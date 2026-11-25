@@ -1,0 +1,19 @@
+{
+  "name": "นำทาง รพ.สกลนคร",
+  "short_name": "นำทาง รพ.สกลนคร",
+  "description": "ระบบนำทางอาคารและแผนกบริการ โรงพยาบาลสกลนคร",
+  "start_url": "/",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#F8FAFC",
+  "theme_color": "#0F766E",
+  "lang": "th",
+  "icons": [
+    {
+      "src": "/icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}

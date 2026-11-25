@@ -1,0 +1,104 @@
+@import "tailwindcss";
+
+:root {
+  --background: #F8FAFC;
+  --foreground: #0F172A;
+  --primary: #0F766E;
+  --primary-emerald: #047857;
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --font-sans: var(--font-sarabun), "Sarabun", sans-serif;
+  --font-heading: var(--font-prompt), "Prompt", sans-serif;
+}
+
+html,
+body {
+  background-color: #F8FAFC;
+  color: #0F172A;
+  font-family: var(--font-sarabun), "Sarabun", -apple-system, BlinkMacSystemFont, sans-serif;
+}
+
+h1,
+h2,
+h3,
+.font-heading {
+  font-family: var(--font-prompt), "Prompt", var(--font-sarabun), sans-serif;
+}
+
+/* Hide scrollbars cleanly on horizontal chip rails while keeping touch scrolling smooth */
+.no-scrollbar::-webkit-scrollbar {
+  display: none;
+}
+
+.no-scrollbar {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
+
+/* Custom Leaflet overrides for clean healthcare map UI */
+.leaflet-container {
+  font-family: var(--font-sarabun), "Sarabun", sans-serif !important;
+  background-color: #E2E8F0;
+}
+
+.leaflet-popup-content-wrapper {
+  border-radius: 14px !important;
+  box-shadow: 0 10px 25px -5px rgba(15, 23, 42, 0.16) !important;
+  border: 1px solid #E2E8F0;
+}
+
+.leaflet-popup-content {
+  margin: 12px 14px !important;
+}
+
+.leaflet-control-zoom {
+  border: 1px solid #CBD5E1 !important;
+  border-radius: 12px !important;
+  overflow: hidden;
+  box-shadow: 0 4px 12px rgba(15, 23, 42, 0.12) !important;
+}
+
+.leaflet-control-zoom a {
+  width: 38px !important;
+  height: 38px !important;
+  line-height: 38px !important;
+  color: #0F172A !important;
+  font-weight: 600;
+}
+
+.leaflet-tooltip.hospital-pin-label {
+  background: rgba(15, 23, 42, 0.88);
+  color: #FFFFFF;
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  border-radius: 8px;
+  padding: 3px 8px;
+  font-size: 12px;
+  font-weight: 600;
+  box-shadow: 0 4px 10px rgba(15, 23, 42, 0.25);
+}
+
+.leaflet-tooltip.hospital-pin-label::before {
+  border-top-color: rgba(15, 23, 42, 0.88);
+}
+
+@keyframes gps-pulse {
+  0% {
+    transform: scale(0.95);
+    box-shadow: 0 0 0 0 rgba(15, 118, 110, 0.65);
+  }
+  70% {
+    transform: scale(1);
+    box-shadow: 0 0 0 14px rgba(15, 118, 110, 0);
+  }
+  100% {
+    transform: scale(0.95);
+    box-shadow: 0 0 0 0 rgba(15, 118, 110, 0);
+  }
+}
+
+.gps-user-dot {
+  animation: gps-pulse 2s infinite;
+}
