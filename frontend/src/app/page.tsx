@@ -11,19 +11,22 @@ import {
   Map as MapIcon,
   Search,
   ShieldAlert,
-  X,
 } from "lucide-react";
 import { api, extractApiError, type MapNode, type RouteResponse } from "@/lib/api";
 import {
   FILTER_CHIPS,
   HOSPITAL_CENTER,
+  calculateBearing,
   calculateDistanceMeters,
   classifyBuilding,
   interpolateAlongPolyline,
   snapToPolyline,
   type FilterCategoryId,
 } from "@/lib/hospital";
+import type { MapViewMode } from "@/lib/hospital3d";
+import { rankBuildingsByQuery } from "@/lib/search";
 import HospitalHeader from "@/components/HospitalHeader";
+import BuildingSearchBar from "@/components/BuildingSearchBar";
 import BuildingCard from "@/components/BuildingCard";
 import RoutePanel from "@/components/RoutePanel";
 import ServiceDirectory from "@/components/ServiceDirectory";
@@ -42,6 +45,19 @@ const PublicNavigationMap = dynamic(
   }
 );
 
+const Public3DMap = dynamic(
+  () => import("@/components/maps/Public3DMap"),
+  {
+    ssr: false,
+    loading: () => (
+      <div className="w-full h-full bg-[#E6EDF4] flex flex-col items-center justify-center gap-2 text-slate-600">
+        <Loader2 className="w-7 h-7 animate-spin text-[#0F766E]" />
+        <span className="text-sm font-medium">กำลังโหลดแผนที่ 3D โรงพยาบาลสกลนคร...</span>
+      </div>
+    ),
+  }
+);
+
 type NavTab = "buildings" | "route" | "services";
 
 const SNAP_THRESHOLD_METERS = 15;
@@ -50,6 +66,8 @@ const REROUTE_COOLDOWN_MS = 5000;
 
 export default function HomePage() {
   const [activeTab, setActiveTab] = useState<NavTab>("buildings");
+  const [mapViewMode, setMapViewMode] = useState<MapViewMode>("3d");
+  const [isDesktopViewport, setIsDesktopViewport] = useState<boolean>(true);
   const [searchInput, setSearchInput] = useState("");
   const [appliedQuery, setAppliedQuery] = useState("");
   const [activeFilter, setActiveFilter] = useState<FilterCategoryId>("all");
@@ -64,6 +82,9 @@ export default function HomePage() {
   >("idle");
   const [userGpsCoords, setUserGpsCoords] =
     useState<[number, number]>(HOSPITAL_CENTER);
+  const [userHeadingDeg, setUserHeadingDeg] = useState<number>(0);
+  const hasCompassHeadingRef = useRef<boolean>(false);
+  const prevMovementCoordsRef = useRef<[number, number]>(HOSPITAL_CENTER);
 
   const [originMode, setOriginMode] = useState<"gps" | "building">("gps");
   const [originBuildingId, setOriginBuildingId] = useState<number | null>(null);
@@ -169,7 +190,21 @@ export default function HomePage() {
   }, []);
 
   const acquireGpsLocation = useCallback(() => {
-    if (typeof window === "undefined" || !navigator.geolocation) {
+    if (typeof window === "undefined") return;
+
+    // Request iOS Safari compass permission if supported (must be called from user gesture)
+    const DeviceOrientationWithPermission = window.DeviceOrientationEvent as
+      | (typeof DeviceOrientationEvent & {
+          requestPermission?: () => Promise<"granted" | "denied">;
+        })
+      | undefined;
+    if (typeof DeviceOrientationWithPermission?.requestPermission === "function") {
+      DeviceOrientationWithPermission.requestPermission().catch(() => {
+        // Ignore if user declines or not in gesture context
+      });
+    }
+
+    if (!navigator.geolocation) {
       setGpsStatus("fallback");
       return;
     }
@@ -179,6 +214,13 @@ export default function HomePage() {
     navigator.geolocation.getCurrentPosition(
       (pos) => {
         setUserGpsCoords([pos.coords.latitude, pos.coords.longitude]);
+        if (
+          typeof pos.coords.heading === "number" &&
+          !Number.isNaN(pos.coords.heading) &&
+          pos.coords.heading >= 0
+        ) {
+          setUserHeadingDeg(pos.coords.heading);
+        }
         setGpsStatus("ready");
       },
       () => {
@@ -197,6 +239,16 @@ export default function HomePage() {
     acquireGpsLocation();
   }, [fetchBuildings, acquireGpsLocation]);
 
+  // Track desktop vs mobile breakpoint so only one WebGL/Leaflet map mounts at a time
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const mq = window.matchMedia("(min-width: 768px)");
+    const update = () => setIsDesktopViewport(mq.matches);
+    update();
+    mq.addEventListener("change", update);
+    return () => mq.removeEventListener("change", update);
+  }, []);
+
   // Continuous Real-Time GPS Watch while actively navigating (disabled during Mock GPS or Building origin)
   useEffect(() => {
     if (
@@ -212,6 +264,14 @@ export default function HomePage() {
     const watchId = navigator.geolocation.watchPosition(
       (pos) => {
         setUserGpsCoords([pos.coords.latitude, pos.coords.longitude]);
+        if (
+          !hasCompassHeadingRef.current &&
+          typeof pos.coords.heading === "number" &&
+          !Number.isNaN(pos.coords.heading) &&
+          pos.coords.heading >= 0
+        ) {
+          setUserHeadingDeg(pos.coords.heading);
+        }
         setGpsStatus("ready");
       },
       () => {
@@ -228,6 +288,87 @@ export default function HomePage() {
       navigator.geolocation.clearWatch(watchId);
     };
   }, [targetBuilding, originMode, mockGpsEnabled]);
+
+  // Real-time mobile compass heading (DeviceOrientationEvent) with smooth shortest-angle interpolation
+  useEffect(() => {
+    if (typeof window === "undefined" || mockGpsEnabled) return;
+
+    const handleOrientation = (ev: DeviceOrientationEvent) => {
+      const webkitHeading = (
+        ev as DeviceOrientationEvent & { webkitCompassHeading?: number }
+      ).webkitCompassHeading;
+
+      let heading: number | null = null;
+      if (typeof webkitHeading === "number" && !Number.isNaN(webkitHeading)) {
+        heading = webkitHeading;
+      } else if (typeof ev.alpha === "number" && !Number.isNaN(ev.alpha)) {
+        // Screen-orientation adjusted heading on Android Chrome
+        const screenAngle =
+          typeof window.screen?.orientation?.angle === "number"
+            ? window.screen.orientation.angle
+            : 0;
+        heading = (360 - ev.alpha + screenAngle) % 360;
+      }
+
+      if (heading === null) return;
+      hasCompassHeadingRef.current = true;
+      const normalized = ((heading % 360) + 360) % 360;
+
+      setUserHeadingDeg((prev) => {
+        const diff = ((normalized - prev + 540) % 360) - 180;
+        if (Math.abs(diff) < 1.5) return prev;
+        return ((prev + diff * 0.35) % 360 + 360) % 360;
+      });
+    };
+
+    window.addEventListener(
+      "deviceorientationabsolute",
+      handleOrientation as EventListener,
+      true
+    );
+    window.addEventListener("deviceorientation", handleOrientation, true);
+
+    return () => {
+      window.removeEventListener(
+        "deviceorientationabsolute",
+        handleOrientation as EventListener,
+        true
+      );
+      window.removeEventListener("deviceorientation", handleOrientation, true);
+    };
+  }, [mockGpsEnabled]);
+
+  // Update heading automatically from movement vector (works great in Mock GPS / Desktop & walking without compass)
+  useEffect(() => {
+    const prev = prevMovementCoordsRef.current;
+    const moved = calculateDistanceMeters(
+      prev[0],
+      prev[1],
+      displayOriginCoords[0],
+      displayOriginCoords[1]
+    );
+    if (moved >= 1.5) {
+      if (mockGpsEnabled || !hasCompassHeadingRef.current) {
+        const moveBearing = calculateBearing(
+          prev[0],
+          prev[1],
+          displayOriginCoords[0],
+          displayOriginCoords[1]
+        );
+        setUserHeadingDeg(moveBearing);
+      }
+      prevMovementCoordsRef.current = displayOriginCoords;
+    }
+  }, [displayOriginCoords, mockGpsEnabled]);
+
+  // Point directional triangle along the start of a newly loaded route when standing still on desktop
+  useEffect(() => {
+    if (hasCompassHeadingRef.current && !mockGpsEnabled) return;
+    if (routeData?.path && routeData.path.length >= 2) {
+      const [p0, p1] = routeData.path;
+      setUserHeadingDeg(calculateBearing(p0[0], p0[1], p1[0], p1[1]));
+    }
+  }, [routeData, mockGpsEnabled]);
 
   const fetchRoute = useCallback(
     async (
@@ -379,10 +520,12 @@ export default function HomePage() {
     setSheetExpanded(true);
   }, []);
 
-  const handleSearchSubmit = (e: React.FormEvent) => {
-    e.preventDefault();
-    const trimmed = searchInput.trim();
+  const handleSearchSubmit = (query: string) => {
+    const trimmed = query.trim();
     setAppliedQuery(trimmed);
+    if (trimmed) {
+      setActiveFilter("all");
+    }
     fetchBuildings(trimmed);
   };
 
@@ -390,6 +533,13 @@ export default function HomePage() {
     setSearchInput("");
     setAppliedQuery("");
     fetchBuildings("");
+  };
+
+  const handleSelectSuggestion = (building: MapNode, fillText: string) => {
+    setSearchInput(fillText);
+    setAppliedQuery(fillText);
+    setActiveFilter("all");
+    setFocusedNode(building);
   };
 
   const handleChangeOriginMode = (
@@ -485,52 +635,57 @@ export default function HomePage() {
     setUserGpsCoords(routeData.path[0]);
   };
 
+  // Live ranked building list: filters instantly as user types (including fuzzy/near matches)
   const filteredBuildings = useMemo(() => {
-    if (activeFilter === "all") return buildings;
-    return buildings.filter((b) => classifyBuilding(b).category === activeFilter);
-  }, [buildings, activeFilter]);
+    const sourceList = allBuildings.length > 0 ? allBuildings : buildings;
+    const liveQuery = searchInput.trim();
+
+    if (liveQuery) {
+      const ranked = rankBuildingsByQuery(sourceList, liveQuery).map(
+        (m) => m.building
+      );
+      if (activeFilter === "all") return ranked;
+      const inCategory = ranked.filter(
+        (b) => classifyBuilding(b).category === activeFilter
+      );
+      // If user typed a department outside current chip, show the ranked matches cleanly
+      return inCategory.length > 0 ? inCategory : ranked;
+    }
+
+    if (activeFilter === "all") return sourceList;
+    return sourceList.filter(
+      (b) => classifyBuilding(b).category === activeFilter
+    );
+  }, [allBuildings, buildings, searchInput, activeFilter]);
 
   // Building Search Content (Figma Frame 1)
   const searchContent = (
     <div className="space-y-4">
-      {/* Search Bar */}
-      <form onSubmit={handleSearchSubmit} className="flex items-center gap-2">
-        <div className="relative flex-1 min-w-0">
-          <Search className="w-5 h-5 text-slate-400 absolute left-3.5 top-1/2 -translate-y-1/2 pointer-events-none" />
-          <input
-            type="text"
-            value={searchInput}
-            onChange={(e) => setSearchInput(e.target.value)}
-            placeholder="พิมพ์ชื่อตึก, แผนก เช่น MICU, ฟอกไต, X-Ray"
-            className="w-full min-h-[48px] pl-11 pr-10 rounded-xl bg-white border border-slate-200 text-sm text-[#0F172A] placeholder:text-slate-400 focus:outline-none focus:border-[#0F766E] focus:ring-2 focus:ring-teal-600/15"
-          />
-          {searchInput && (
-            <button
-              type="button"
-              onClick={handleClearSearch}
-              aria-label="ล้างคำค้นหา"
-              className="w-9 h-9 rounded-lg hover:bg-slate-100 text-slate-400 hover:text-slate-700 absolute right-1.5 top-1/2 -translate-y-1/2 flex items-center justify-center cursor-pointer"
-            >
-              <X className="w-4 h-4" />
-            </button>
-          )}
-        </div>
-        <button
-          type="submit"
-          className="min-h-[48px] px-4 rounded-xl bg-[#0F766E] hover:bg-[#115E59] text-white text-sm font-semibold shrink-0 shadow-sm transition-colors cursor-pointer"
-        >
-          ค้นหา
-        </button>
-      </form>
+      {/* Live Autocomplete & Fuzzy Search Bar */}
+      <BuildingSearchBar
+        value={searchInput}
+        allBuildings={allBuildings.length > 0 ? allBuildings : buildings}
+        onChange={(nextVal) => {
+          setSearchInput(nextVal);
+          if (!nextVal.trim() && appliedQuery) {
+            setAppliedQuery("");
+            fetchBuildings("");
+          }
+        }}
+        onSubmit={handleSearchSubmit}
+        onClear={handleClearSearch}
+        onSelectSuggestion={handleSelectSuggestion}
+        onRouteSuggestion={handleSelectRoute}
+      />
 
       {/* Horizontal Filter Chips */}
       <div className="flex items-center gap-2 overflow-x-auto no-scrollbar pb-0.5">
         {FILTER_CHIPS.map((chip) => {
           const isActive = activeFilter === chip.id;
+          const totalCount =
+            allBuildings.length > 0 ? allBuildings.length : buildings.length;
           const countSuffix =
-            chip.id === "all" && buildings.length > 0
-              ? ` (${buildings.length})`
-              : "";
+            chip.id === "all" && totalCount > 0 ? ` (${totalCount})` : "";
           return (
             <button
               key={chip.id}
@@ -553,9 +708,9 @@ export default function HomePage() {
       <div className="flex items-center justify-between pt-1">
         <h2 className="font-heading text-base font-bold text-[#0F172A]">
           รายชื่อตึกและแผนก
-          {appliedQuery && (
+          {searchInput.trim() && (
             <span className="text-sm font-normal text-slate-500 ml-1.5">
-              (&ldquo;{appliedQuery}&rdquo;)
+              (&ldquo;{searchInput.trim()}&rdquo;)
             </span>
           )}
         </h2>
@@ -594,7 +749,7 @@ export default function HomePage() {
           <p className="text-xs text-slate-500">
             ลองล้างคำค้นหาหรือเปลี่ยนตัวกรองเป็น &ldquo;ทั้งหมด&rdquo;
           </p>
-          {(appliedQuery || activeFilter !== "all") && (
+          {(searchInput.trim() || appliedQuery || activeFilter !== "all") && (
             <button
               type="button"
               onClick={() => {
@@ -669,9 +824,12 @@ export default function HomePage() {
   };
 
   const sharedMapProps = {
+    mapViewMode,
+    onChangeMapViewMode: setMapViewMode,
     buildings: allBuildings.length > 0 ? allBuildings : buildings,
     displayOriginCoords,
     rawOriginCoords,
+    userHeadingDeg,
     isSnappedToPath: snapResult.isSnapped,
     isAutoRerouting,
     distanceToTargetMeters,
@@ -689,6 +847,13 @@ export default function HomePage() {
     onChangeMockProgress: handleChangeMockProgress,
     onResetMockWalk: handleResetMockWalk,
   };
+
+  const activeMapElement =
+    mapViewMode === "3d" ? (
+      <Public3DMap {...sharedMapProps} />
+    ) : (
+      <PublicNavigationMap {...sharedMapProps} />
+    );
 
   return (
     <div className="h-dvh w-full overflow-hidden flex flex-col md:flex-row bg-[#F8FAFC]">
@@ -754,7 +919,7 @@ export default function HomePage() {
 
       {/* ================= DESKTOP / TABLET RIGHT MAP AREA ================= */}
       <main className="hidden md:block flex-1 h-full relative">
-        <PublicNavigationMap {...sharedMapProps} />
+        {isDesktopViewport ? activeMapElement : null}
       </main>
 
       {/* ================= MOBILE FULL-EXPERIENCE WEB APP (< 768px) ================= */}
@@ -777,7 +942,7 @@ export default function HomePage() {
             <div className="h-full w-full relative flex flex-col">
               {/* Full-screen Map behind Bottom Sheet */}
               <div className="flex-1 relative min-h-0">
-                <PublicNavigationMap {...sharedMapProps} />
+                {!isDesktopViewport ? activeMapElement : null}
 
                 {/* Mobile Slide-Up Bottom Sheet */}
                 <div

@@ -1,7 +1,7 @@
 import type { MapNode, RouteResponse } from "./api";
 
-// Default Sakon Nakhon Hospital coordinates
-export const HOSPITAL_CENTER: [number, number] = [17.1634, 104.1476];
+// Real Sakon Nakhon Hospital campus center (OSM way/494975554, Charoen Muang Rd.)
+export const HOSPITAL_CENTER: [number, number] = [17.1633, 104.1580];
 export const HOSPITAL_DEFAULT_ZOOM = 17;
 
 export const ESRI_SATELLITE_URL =
@@ -52,23 +52,81 @@ export interface BuildingBadgeInfo {
  * - ศูนย์เฉพาะทาง / ตึก 8 ชั้น: #047857 on #CCFBF1
  */
 export function classifyBuilding(node: MapNode): BuildingBadgeInfo {
+  const nameLower = (node.name || "").toLowerCase();
   const text = `${node.name} ${node.keywords} ${node.indoor_guide}`.toLowerCase();
 
+  // Check explicit primary tower names first so keywords like "Trauma" in ตึกร่มธรรม don't misclassify it as ER
+  if (nameLower.includes("10 ชั้น") || nameLower.includes("ร่มเย็น")) {
+    return {
+      category: "maternal_child",
+      badgeLabel: "ตึก 10 ชั้น",
+      badgeStyle: {
+        text: "#047857",
+        bg: "#CCFBF1",
+        border: "#99F6E4",
+      },
+      subtitle: "ตึกร่มเย็น 10 ชั้น • เด็ก, สูติ-นรีเวช, ตา, หู คอ จมูก, พิเศษ",
+    };
+  }
+
+  if (nameLower.includes("8 ชั้น") || nameLower.includes("ร่มธรรม")) {
+    return {
+      category: "specialty",
+      badgeLabel: "ตึก 8 ชั้น",
+      badgeStyle: {
+        text: "#047857",
+        bg: "#CCFBF1",
+        border: "#99F6E4",
+      },
+      subtitle: "ตึกร่มธรรม 8 ชั้น • หอผู้ป่วยใน, MICU, Stroke, Trauma",
+    };
+  }
+
+  if (nameLower.includes("หัวใจเพื่อแผ่นดิน")) {
+    return {
+      category: "specialty",
+      badgeLabel: "ศูนย์หัวใจ",
+      badgeStyle: {
+        text: "#1D4ED8",
+        bg: "#DBEAFE",
+        border: "#BFDBFE",
+      },
+      subtitle: "ชั้น 1 จุดชำระเงิน / รับยา • ศูนย์หัวใจ, CICU, OR, ฟอกไต",
+    };
+  }
+
   if (
-    text.includes("ฉุกเฉิน") ||
-    text.includes("อุบัติเหตุ") ||
-    text.includes("trauma") ||
-    /\ber\b/.test(text)
+    nameLower.includes("ฉุกเฉิน") ||
+    nameLower.includes("อุบัติเหตุ") ||
+    /\ber\b/.test(nameLower) ||
+    text.includes("ห้องอุบัติเหตุฉุกเฉิน")
   ) {
     return {
       category: "er_opd",
-      badgeLabel: "ER / ฉุกเฉิน",
+      badgeLabel: "ER / OPD",
       badgeStyle: {
         text: "#BE123C",
         bg: "#FFE4E6",
         border: "#FECDD3",
       },
-      subtitle: "เปิดบริการ 24 ชั่วโมง • จุดคัดกรองและฉุกเฉิน",
+      subtitle: "ตึก 9 ชั้น • ฉุกเฉิน 24 ชม., ผิวหนัง, สูติฯ, ตา, หู คอ จมูก",
+    };
+  }
+
+  if (
+    nameLower.includes("วิเคราะห์") ||
+    nameLower.includes("ล้างไต") ||
+    nameLower.includes("ไตเทียม")
+  ) {
+    return {
+      category: "diagnostic",
+      badgeLabel: "ตรวจ / ไตเทียม",
+      badgeStyle: {
+        text: "#1D4ED8",
+        bg: "#DBEAFE",
+        border: "#BFDBFE",
+      },
+      subtitle: "อาคารตรวจวิเคราะห์ ห้องปฏิบัติการ ล้างไต และเอ็กซ์เรย์",
     };
   }
 
@@ -91,22 +149,29 @@ export function classifyBuilding(node: MapNode): BuildingBadgeInfo {
   }
 
   if (
+    text.includes("ตึกร่มเย็น") ||
+    text.includes("10 ชั้น") ||
     text.includes("สูติ") ||
     text.includes("นรีเวช") ||
     text.includes("กุมาร") ||
     text.includes("เด็ก") ||
     text.includes("คลอด") ||
-    text.includes("nicu")
+    text.includes("nicu") ||
+    text.includes("picu")
   ) {
     return {
       category: "maternal_child",
-      badgeLabel: "เด็ก / สูติฯ",
+      badgeLabel: text.includes("10 ชั้น") || text.includes("ร่มเย็น")
+        ? "ตึก 10 ชั้น"
+        : "เด็ก / สูติฯ",
       badgeStyle: {
         text: "#047857",
         bg: "#CCFBF1",
         border: "#99F6E4",
       },
-      subtitle: "คลินิกกุมารเวชกรรมและสูติ-นรีเวช",
+      subtitle: text.includes("ร่มเย็น")
+        ? "ตึกร่มเย็น 10 ชั้น • เด็ก, สูติ-นรีเวช, ตา, หู คอ จมูก, พิเศษ"
+        : "คลินิกกุมารเวชกรรมและสูติ-นรีเวช",
     };
   }
 
@@ -233,7 +298,7 @@ export interface TurnStep {
   isDestination?: boolean;
 }
 
-function getBearing(
+export function calculateBearing(
   lat1: number,
   lng1: number,
   lat2: number,
@@ -248,6 +313,63 @@ function getBearing(
       Math.cos(toRad(lat2)) *
       Math.cos(toRad(lng2 - lng1));
   return (toDeg(Math.atan2(y, x)) + 360) % 360;
+}
+
+/**
+ * Builds crisp HTML/SVG for a directional user location triangle with a soft forward vision cone.
+ * - For Leaflet 2D: pass `rotateInHtml = true` so CSS rotates the marker by `headingDeg`.
+ * - For MapLibre 3D: pass `rotateInHtml = false` and use MapLibre Marker's native `setRotation(headingDeg)`
+ *   with `rotationAlignment: "map"` so it stays aligned even when the 3D map is rotated/tilted.
+ */
+export function buildDirectionalUserMarkerHTML(
+  headingDeg: number,
+  isMock: boolean,
+  rotateInHtml = true
+): string {
+  const mainColor = isMock ? "#D97706" : "#0F766E";
+  const coneColor = isMock ? "#F59E0B" : "#14B8A6";
+  const gradId = isMock ? "user-cone-mock" : "user-cone-live";
+  const transformStyle = rotateInHtml
+    ? `transform:rotate(${Math.round(headingDeg)}deg);transition:transform 180ms ease-out;`
+    : "";
+
+  return `
+    <div style="width:64px;height:64px;display:flex;align-items:center;justify-content:center;pointer-events:none;${transformStyle}">
+      <svg width="64" height="64" viewBox="0 0 64 64" fill="none" xmlns="http://www.w3.org/2000/svg" style="overflow:visible;">
+        <defs>
+          <radialGradient id="${gradId}" cx="50%" cy="50%" r="50%">
+            <stop offset="0%" stop-color="${coneColor}" stop-opacity="0.52" />
+            <stop offset="70%" stop-color="${coneColor}" stop-opacity="0.18" />
+            <stop offset="100%" stop-color="${coneColor}" stop-opacity="0" />
+          </radialGradient>
+        </defs>
+        <!-- Soft forward vision beam cone pointing North (0 deg) -->
+        <path d="M32 32 L13 4 A32 32 0 0 1 51 4 Z" fill="url(#${gradId})" />
+        <!-- Subtle outer pulse halo -->
+        <circle cx="32" cy="32" r="14" fill="${coneColor}" fill-opacity="0.22" />
+        <!-- Crisp directional navigation triangle pointing forward (up = 0 deg North) -->
+        <path
+          d="M32 13 L45 43 L32 36.5 L19 43 Z"
+          fill="${mainColor}"
+          stroke="#FFFFFF"
+          stroke-width="3"
+          stroke-linejoin="round"
+          style="filter:drop-shadow(0 2px 5px rgba(15,23,42,0.45));"
+        />
+        <!-- Center anchor dot -->
+        <circle cx="32" cy="32" r="2.8" fill="#FFFFFF" />
+      </svg>
+    </div>
+  `;
+}
+
+function getBearing(
+  lat1: number,
+  lng1: number,
+  lat2: number,
+  lng2: number
+): number {
+  return calculateBearing(lat1, lng1, lat2, lng2);
 }
 
 function bearingToThaiDirection(bearing: number): string {

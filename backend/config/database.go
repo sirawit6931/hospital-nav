@@ -84,3 +84,414 @@ func SeedDefaultAdmin() error {
 	log.Printf("Seeded default admin account %q successfully", defaultUsername)
 	return nil
 }
+
+type seedNodeSpec struct {
+	Key         string
+	Name        string
+	IsBuilding  bool
+	Keywords    string
+	IndoorGuide string
+	Lat         float64
+	Lng         float64
+}
+
+type seedEdgeSpec struct {
+	FromKey     string
+	ToKey       string
+	Instruction string
+	Wheelchair  bool
+}
+
+// InitialHospitalSeedData returns the official Sakon Nakhon Hospital buildings, walkway junctions,
+// and walkable edges aligned 100% with the official hospital wall maps and public/data/sakon-hospital-3d.json.
+func initialHospitalSeedData() ([]seedNodeSpec, []seedEdgeSpec) {
+	initialNodes := []seedNodeSpec{
+		// === Official Sakon Nakhon Hospital Buildings ===
+		{
+			Key:        "bldg_er_9f",
+			Name:       "อาคารอุบัติเหตุฉุกเฉินและผู้ป่วยนอก (ตึก 9 ชั้น)",
+			IsBuilding: true,
+			Keywords:   "ER, อุบัติเหตุฉุกเฉิน, ผู้ป่วยนอก, OPD, คลินิกผิวหนัง, สูติ-นรีเวช, ตา, หู คอ จมูก, ENT, คัดกรอง, ประกันสังคม, ตึก 9 ชั้น",
+			IndoorGuide: "ชั้น 1: ห้องอุบัติเหตุฉุกเฉิน (ER), จุดคัดกรอง, ประชาสัมพันธ์ และตรวจผู้ป่วยนอกทั่วไป\n" +
+				"ชั้น 2: คลินิกโรคผิวหนัง\n" +
+				"ชั้น 3: คลินิกสูติ-นรีเวชกรรม\n" +
+				"ชั้น 4: คลินิกตา และคลินิกหู คอ จมูก (ENT)\n" +
+				"ชั้น 5–9: หอผู้ป่วยอุบัติเหตุ หอผู้ป่วยวิกฤต และห้องประชุมภูริทัตโต (ชั้น 9)",
+			Lat: 17.163853,
+			Lng: 104.158522,
+		},
+		{
+			Key:        "bldg_romyen_10f",
+			Name:       "ตึก 10 ชั้น (ตึกร่มเย็น)",
+			IsBuilding: true,
+			Keywords:   "ตึกร่มเย็น, ร่มเย็น, ตึก 10 ชั้น, NICU, PICU, Sick Newborn, ทารกแรกเกิด, กุมารเวชกรรม 2, กุมารเวชกรรม 3, เด็ก, ตา, Eye Ward, หู คอ จมูก, ENT, นรีเวชกรรม, Gyno, สูติกรรมหลังคลอด, PP, หอผู้ป่วยพิเศษ, Special Ward",
+			IndoorGuide: "ตั้งอยู่ฝั่งทิศใต้ของอาคารรังสีรักษา ติดทางเดินมีหลังคาแกนกลาง (ตรงข้ามตึกร่มธรรม):\n" +
+				"ชั้น 1: หอผู้ป่วยวิกฤตทารกแรกเกิด 1, 2 (NICU)\n" +
+				"ชั้น 2: หอผู้ป่วยวิกฤตเด็ก (PICU)\n" +
+				"ชั้น 3: หอผู้ป่วยทารกแรกเกิดป่วย (Sick Newborn)\n" +
+				"ชั้น 4: หอผู้ป่วยกุมารเวชกรรม 2\n" +
+				"ชั้น 5: หอผู้ป่วยกุมารเวชกรรม 3\n" +
+				"ชั้น 6: หอผู้ป่วยตา (Eye Ward)\n" +
+				"ชั้น 7: หอผู้ป่วยหู คอ จมูก (ENT)\n" +
+				"ชั้น 8: หอผู้ป่วยนรีเวชกรรม (Gyno)\n" +
+				"ชั้น 9: หอผู้ป่วยสูติกรรมหลังคลอด (PP)\n" +
+				"ชั้น 10: หอผู้ป่วยพิเศษ (Special Ward)",
+			Lat: 17.163700,
+			Lng: 104.157440,
+		},
+		{
+			Key:        "bldg_romtham_8f",
+			Name:       "ตึกร่มธรรม (ตึก 8 ชั้น)",
+			IsBuilding: true,
+			Keywords:   "ตึกร่มธรรม, ร่มธรรม, ตึก 8 ชั้น, หอผู้ป่วยใน, IPD, MICU, Stroke, Trauma, ห้องยาผู้ป่วยใน, อายุรกรรม, ศัลยกรรม",
+			IndoorGuide: "ตั้งอยู่ติดด้านทิศใต้ของอาคารอุบัติเหตุฉุกเฉินฯ และเหนือลานจอดรถกลาง:\n" +
+				"ชั้น G: ห้องยาผู้ป่วยใน และจุดบริการ\n" +
+				"ชั้น 1–2: อายุรกรรม, MICU และ Stroke Unit\n" +
+				"ชั้น 3–4: หอผู้ป่วยในอายุรกรรม และห้องพิเศษ\n" +
+				"ชั้น 5–7: หอผู้ป่วยศัลยกรรม และ Trauma",
+			Lat: 17.163440,
+			Lng: 104.158260,
+		},
+		{
+			Key:        "bldg_heart",
+			Name:       "อาคารหัวใจเพื่อแผ่นดิน",
+			IsBuilding: true,
+			Keywords:   "อาคารหัวใจเพื่อแผ่นดิน, ตึกหัวใจเพื่อแผ่นดิน, จุดชำระเงิน, การเงิน, รับยา ชั้น 1, ห้องยา, ศูนย์หัวใจ, CICU, OR, ผ่าตัดหัวใจ, ฟอกไต, คลินิกนอกเวลา, SMC",
+			IndoorGuide: "ตั้งอยู่ฝั่งทิศตะวันออกติดกับอาคารอุบัติเหตุฉุกเฉินและผู้ป่วยนอก:\n" +
+				"ชั้น 1: จุดชำระเงิน (การเงิน), จุดรับยาผู้ป่วยนอก และลงทะเบียนศูนย์หัวใจ\n" +
+				"ชั้น 2–3: หน่วยตรวจพิเศษโรคหัวใจ, คลินิกพิเศษนอกเวลาราชการ (SMC) และศูนย์ฟอกไต\n" +
+				"ชั้น 4: ห้องผ่าตัดหัวใจ (OR) และหอผู้ป่วยวิกฤตโรคหัวใจ (CICU)",
+			Lat: 17.163910,
+			Lng: 104.159230,
+		},
+		{
+			Key:        "bldg_radiology_mri",
+			Name:       "อาคารรังสีรักษา / ศูนย์ MRI",
+			IsBuilding: true,
+			Keywords:   "อาคารรังสีรักษา, รังสีรักษา, ศูนย์ MRI, MRI, CT Scan, เอกซเรย์, รังสีวิทยา, เวชศาสตร์นิวเคลียร์",
+			IndoorGuide: "ตั้งอยู่ฝั่งทิศตะวันตกของอาคารอุบัติเหตุฉุกเฉินฯ และเหนือตึกร่มเย็น:\n" +
+				"ชั้น 1: ศูนย์ตรวจ MRI และเครื่องเอกซเรย์คอมพิวเตอร์ (CT Scan)\n" +
+				"ชั้น 2–4: หน่วยรังสีรักษาและเวชศาสตร์นิวเคลียร์",
+			Lat: 17.164340,
+			Lng: 104.157840,
+		},
+		{
+			Key:         "bldg_surgery_delivery",
+			Name:        "อาคารศัลยกรรม คลอดผ่าตัด",
+			IsBuilding:  true,
+			Keywords:    "อาคารศัลยกรรม, คลอดผ่าตัด, ห้องคลอด, ผ่าตัด, ศัลยกรรม, OR, สูติกรรม",
+			IndoorGuide: "ตั้งอยู่ทางทิศใต้ของตึกร่มเย็นและอาคารพัสดุ เชื่อมต่อตรงกับทางเดินมีหลังคาแกนกลาง",
+			Lat:         17.163050,
+			Lng:         104.157260,
+		},
+		{
+			Key:         "bldg_analysis_therapy",
+			Name:        "อาคารวิเคราะห์ วิจัย บำบัด",
+			IsBuilding:  true,
+			Keywords:    "อาคารวิเคราะห์ วิจัย บำบัด, ห้องปฏิบัติการ, แล็บ, Lab, ตรวจเลือด, เจาะเลือด, วิเคราะห์, บำบัด",
+			IndoorGuide: "ตั้งอยู่บริเวณทางเข้าฝั่งถนนเจริญเมือง ติดกับโบสถ์หลวงพ่อองค์ดำและอาคารไตเทียมเอกชน",
+			Lat:         17.161500,
+			Lng:         104.157680,
+		},
+		{
+			Key:         "bldg_capd_xray",
+			Name:        "อาคารล้างไตทางช่องท้อง / เอ็กซ์เรย์",
+			IsBuilding:  true,
+			Keywords:    "ล้างไตทางช่องท้อง, ล้างไต, CAPD, เอ็กซ์เรย์, เอกซเรย์, X-Ray",
+			IndoorGuide: "ตั้งอยู่หัวมุมทิศตะวันตกเฉียงใต้ฝั่งถนนเจริญเมือง ให้บริการล้างไตทางช่องท้องและเอ็กซ์เรย์ทั่วไป",
+			Lat:         17.161760,
+			Lng:         104.156962,
+		},
+		{
+			Key:         "bldg_private_dialysis",
+			Name:        "อาคารไตเทียมเอกชน",
+			IsBuilding:  true,
+			Keywords:    "ไตเทียมเอกชน, ฟอกไต, ล้างไต, Hemodialysis",
+			IndoorGuide: "ตั้งอยู่ติดถนนเจริญเมือง ใกล้โบสถ์หลวงพ่อองค์ดำและอาคารวิเคราะห์ วิจัย บำบัด",
+			Lat:         17.161327,
+			Lng:         104.157417,
+		},
+		{
+			Key:         "bldg_pharmacy",
+			Name:        "อาคารเภสัชกรรม",
+			IsBuilding:  true,
+			Keywords:    "อาคารเภสัชกรรม, เภสัชกรรม, ห้องยา, จ่ายยา, คลังยา",
+			IndoorGuide: "ตั้งอยู่โซนกลางใต้ถัดจากลานจอดรถกลาง ใกล้กับอาคารผู้ป่วยกุมารเวชกรรม 1, 2 และศูนย์เครื่องมือแพทย์",
+			Lat:         17.162620,
+			Lng:         104.158010,
+		},
+		{
+			Key:         "bldg_physio_thai",
+			Name:        "อาคารกายภาพบำบัด / แพทย์แผนไทย",
+			IsBuilding:  true,
+			Keywords:    "กายภาพบำบัด, เวชศาสตร์ฟื้นฟู, แพทย์แผนไทย, นวดแผนไทย, ฝึกเดิน",
+			IndoorGuide: "ตั้งอยู่โซนฝั่งตะวันออก ใกล้กับอาคารร่มฟ้าและงานจ่ายกลาง รองรับทางลาดรถเข็นตลอดแนว",
+			Lat:         17.162440,
+			Lng:         104.158420,
+		},
+		{
+			Key:         "bldg_phra_ajan_fan",
+			Name:        "อาคารพระอาจารย์ฝั้น อาจาโร",
+			IsBuilding:  true,
+			Keywords:    "อาคารพระอาจารย์ฝั้น อาจาโร, พระอาจารย์ฝั้น, หอผู้ป่วย",
+			IndoorGuide: "ตั้งอยู่โซนกลางใต้ ใกล้กับอาคารผู้ป่วยหนักเด็ก (PICU/NICU 2) และอาคารกุมารเวชกรรม 3",
+			Lat:         17.162146,
+			Lng:         104.157374,
+		},
+		{
+			Key:         "bldg_rompho",
+			Name:        "อาคารร่มโพธิ์",
+			IsBuilding:  true,
+			Keywords:    "อาคารร่มโพธิ์, ร่มโพธิ์, กายอุปกรณ์, ศัลยกรรมกระดูก, ใจสว่าง, ประชุม, ฝึกอบรม",
+			IndoorGuide: "ตั้งอยู่โซนตะวันออกเฉียงใต้ติดลานจอดรถฝั่งใต้ ใกล้กับอาคารกายอุปกรณ์และอาคารศัลยกรรมกระดูก",
+			Lat:         17.161477,
+			Lng:         104.158504,
+		},
+		{
+			Key:         "bldg_ent_sicu",
+			Name:        "อาคารผู้ป่วย ตา หู คอ จมูก / ผู้ป่วยหนักศัลยกรรม",
+			IsBuilding:  true,
+			Keywords:    "ตา, หู คอ จมูก, ผู้ป่วยหนักศัลยกรรม, SICU, งานทันตกรรม, งานกิจการภาพ",
+			IndoorGuide: "ตั้งอยู่โซนฝั่งตะวันตกติดด้านทิศใต้ของอาคารศัลยกรรม คลอดผ่าตัด",
+			Lat:         17.162550,
+			Lng:         104.157180,
+		},
+		{
+			Key:         "bldg_doklamduan",
+			Name:        "อาคารดอกลำดวน / อาชีวอนามัย / ห้องสมุด คลังเภสัชกรรม",
+			IsBuilding:  true,
+			Keywords:    "อาคารดอกลำดวน, งานทันตกรรม, งานกิจการภาพ, อาชีวอนามัย, ห้องสมุด, คลังเภสัชกรรม",
+			IndoorGuide: "ตั้งอยู่โซนตะวันตกเฉียงใต้ ถัดจากอาคารผู้ป่วย ตา หู คอ จมูก",
+			Lat:         17.162276,
+			Lng:         104.156996,
+		},
+		{
+			Key:         "bldg_micu1_obgyn",
+			Name:        "อาคารผู้ป่วยหนัก (MICU 1) / สูตินรีเวช",
+			IsBuilding:  true,
+			Keywords:    "MICU 1, อาคารผู้ป่วยหนัก, อาคารผู้ป่วยสูตินรีเวช, สูตินรีเวช",
+			IndoorGuide: "ตั้งอยู่ติดด้านทิศใต้ของลานจอดรถกลาง เหนืออาคารผู้ป่วยหนักเด็ก (PICU/NICU 2)",
+			Lat:         17.162760,
+			Lng:         104.157550,
+		},
+		{
+			Key:         "bldg_picu_nicu2",
+			Name:        "อาคารผู้ป่วยหนักเด็ก (PICU / NICU 2)",
+			IsBuilding:  true,
+			Keywords:    "PICU, NICU 2, อาคารผู้ป่วยหนักเด็ก, เด็ก",
+			IndoorGuide: "ตั้งอยู่โซนกลางใต้ ติดกับอาคารผู้ป่วยสูตินรีเวชและอาคารพระอาจารย์ฝั้น อาจาโร",
+			Lat:         17.162490,
+			Lng:         104.157570,
+		},
+		{
+			Key:         "bldg_pediatrics_12",
+			Name:        "อาคารผู้ป่วยกุมารเวชกรรม 1, 2",
+			IsBuilding:  true,
+			Keywords:    "กุมารเวชกรรม 1, กุมารเวชกรรม 2, อาคารผู้ป่วยกุมารเวชกรรม, เด็ก",
+			IndoorGuide: "ตั้งอยู่ติดด้านทิศใต้ของอาคารเภสัชกรรม",
+			Lat:         17.162280,
+			Lng:         104.157980,
+		},
+		{
+			Key:         "bldg_med_equip_cssd",
+			Name:        "ศูนย์เครื่องมือแพทย์ / งานจ่ายกลาง",
+			IsBuilding:  true,
+			Keywords:    "ศูนย์เครื่องมือแพทย์, งานจ่ายกลาง, ศูนย์จ่ายกลาง, CSSD",
+			IndoorGuide: "ตั้งอยู่ฝั่งตะวันออกของอาคารเภสัชกรรม ใกล้งานซักฟอก",
+			Lat:         17.162540,
+			Lng:         104.158300,
+		},
+		{
+			Key:         "bldg_romfah",
+			Name:        "อาคารร่มฟ้า",
+			IsBuilding:  true,
+			Keywords:    "อาคารร่มฟ้า, ตึกร่มฟ้า, ร่มฟ้า",
+			IndoorGuide: "ตั้งอยู่โซนตะวันออก ใต้อาคารกายภาพบำบัด / แพทย์แผนไทย",
+			Lat:         17.162020,
+			Lng:         104.158480,
+		},
+		{
+			Key:         "bldg_romchat",
+			Name:        "อาคารร่มฉัตร",
+			IsBuilding:  true,
+			Keywords:    "อาคารร่มฉัตร, ตึกร่มฉัตร, ร่มฉัตร, เรือนพักญาติ",
+			IndoorGuide: "ตั้งอยู่ติดฝั่งตะวันออกของอาคารร่มฟ้า ใกล้เรือนพักญาติ",
+			Lat:         17.161920,
+			Lng:         104.158680,
+		},
+		{
+			Key:         "bldg_ortho_jaisawang",
+			Name:        "อาคารผู้ป่วยศัลยกรรมกระดูก / ใจสว่าง",
+			IsBuilding:  true,
+			Keywords:    "ศัลยกรรมกระดูก, ใจสว่าง, ผู้ป่วยศัลยกรรมกระดูก, กระดูก, ออร์โธปิดิกส์",
+			IndoorGuide: "ตั้งอยู่ติดฝั่งตะวันออกของอาคารร่มโพธิ์ ใกล้อาคารกายอุปกรณ์",
+			Lat:         17.161640,
+			Lng:         104.158720,
+		},
+		{
+			Key:         "bldg_prosthetics",
+			Name:        "อาคารกายอุปกรณ์",
+			IsBuilding:  true,
+			Keywords:    "อาคารกายอุปกรณ์, กายอุปกรณ์, แขนขาเทียม",
+			IndoorGuide: "ตั้งอยู่โซนตะวันออกเฉียงใต้ ใกล้อาคารศัลยกรรมกระดูกและอาคารร่มโพธิ์",
+			Lat:         17.161300,
+			Lng:         104.158720,
+		},
+		{
+			Key:         "bldg_boht_ongdam",
+			Name:        "โบสถ์หลวงพ่อองค์ดำ",
+			IsBuilding:  true,
+			Keywords:    "โบสถ์หลวงพ่อองค์ดำ, หลวงพ่อองค์ดำ, หอพระ",
+			IndoorGuide: "ตั้งอยู่โซนทิศใต้ใกล้ถนนเจริญเมือง ระหว่างอาคารไตเทียมเอกชนและอาคารวิเคราะห์ วิจัย บำบัด",
+			Lat:         17.161923,
+			Lng:         104.157323,
+		},
+
+		// === Key Walkway Junctions & Hospital Entrances (is_building = false) ===
+		{Key: "j_gate_north", Name: "ประตูทางเข้าหลัก (ฝั่งหนองหาร)", IsBuilding: false, Lat: 17.165050, Lng: 104.158180},
+		{Key: "j_gate_er", Name: "ทางเข้าฉุกเฉิน / ลานจอดรถเหนือ", IsBuilding: false, Lat: 17.165020, Lng: 104.159020},
+		{Key: "j_north_plaza", Name: "แยกหน้าอาคารอุบัติเหตุฉุกเฉินฯ", IsBuilding: false, Lat: 17.164340, Lng: 104.158450},
+		{Key: "j_walkway_north", Name: "ทางเชื่อมมีหลังคาเหนือ (รังสีรักษา / ตึก 9 ชั้น)", IsBuilding: false, Lat: 17.164180, Lng: 104.158080},
+		{Key: "j_er_heart_link", Name: "ทางเชื่อมตึกอุบัติเหตุฯ – อาคารหัวใจเพื่อแผ่นดิน", IsBuilding: false, Lat: 17.163880, Lng: 104.158880},
+		{Key: "j_er_romtham_link", Name: "ทางเชื่อมตึกอุบัติเหตุฯ – ตึกร่มธรรม (8 ชั้น)", IsBuilding: false, Lat: 17.163660, Lng: 104.158380},
+		{Key: "j_walkway_mid", Name: "ทางเดินมีหลังคาแกนกลาง (ร่มเย็น / ร่มธรรม)", IsBuilding: false, Lat: 17.163660, Lng: 104.157860},
+		{Key: "j_walkway_south", Name: "ทางเดินมีหลังคาใต้ (ลานจอดรถกลาง / ศัลยกรรม คลอดผ่าตัด)", IsBuilding: false, Lat: 17.162920, Lng: 104.157580},
+		{Key: "j_central_south", Name: "แยกโซนกลางใต้ (เภสัชกรรม / กายภาพฯ / พระอาจารย์ฝั้น)", IsBuilding: false, Lat: 17.162450, Lng: 104.157480},
+		{Key: "j_south_plaza", Name: "แยกหน้าโบสถ์หลวงพ่อองค์ดำ / ถนนเจริญเมือง", IsBuilding: false, Lat: 17.161620, Lng: 104.157400},
+		{Key: "j_south_parking", Name: "แยกหน้าลานจอดรถฝั่งใต้ / อาคารร่มโพธิ์", IsBuilding: false, Lat: 17.161760, Lng: 104.158170},
+	}
+
+	initialEdges := []seedEdgeSpec{
+		// North entrances -> ตึก 9 ชั้น (ER/OPD), รังสีรักษา / ศูนย์ MRI
+		{FromKey: "j_gate_north", ToKey: "j_north_plaza", Instruction: "เดินตรงจากประตูหลักมุ่งหน้าอาคารอุบัติเหตุฉุกเฉินและผู้ป่วยนอก", Wheelchair: true},
+		{FromKey: "j_gate_er", ToKey: "j_north_plaza", Instruction: "เข้าทางประตูฉุกเฉินผ่านหน้าลานจอดรถเหนือสู่ตึก 9 ชั้น", Wheelchair: true},
+		{FromKey: "j_north_plaza", ToKey: "bldg_er_9f", Instruction: "เข้าสู่อาคารอุบัติเหตุฉุกเฉินและผู้ป่วยนอก (ตึก 9 ชั้น)", Wheelchair: true},
+		{FromKey: "j_north_plaza", ToKey: "j_walkway_north", Instruction: "เดินตามทางเดินมีหลังคาไปฝั่งตะวันตก (อาคารรังสีรักษา)", Wheelchair: true},
+		{FromKey: "j_walkway_north", ToKey: "bldg_radiology_mri", Instruction: "เข้าสู่อาคารรังสีรักษา / ศูนย์ MRI", Wheelchair: true},
+		{FromKey: "j_walkway_north", ToKey: "bldg_er_9f", Instruction: "เดินเชื่อมเข้าสู่อาคารอุบัติเหตุฉุกเฉินและผู้ป่วยนอก", Wheelchair: true},
+
+		// Core Covered Walkway Hub: ตึก 9 ชั้น <-> อาคารหัวใจเพื่อแผ่นดิน <-> ตึกร่มธรรม (8 ชั้น) <-> ตึกร่มเย็น (10 ชั้น)
+		{FromKey: "bldg_er_9f", ToKey: "j_er_heart_link", Instruction: "เดินผ่านทางเชื่อมมีหลังคาจากตึก 9 ชั้น ไปอาคารหัวใจเพื่อแผ่นดิน", Wheelchair: true},
+		{FromKey: "j_er_heart_link", ToKey: "bldg_heart", Instruction: "เข้าสู่ชั้น 1 อาคารหัวใจเพื่อแผ่นดิน (จุดชำระเงิน / รับยา / ศูนย์หัวใจ)", Wheelchair: true},
+		{FromKey: "bldg_er_9f", ToKey: "j_er_romtham_link", Instruction: "เดินตามทางเชื่อมมีหลังคาจากตึก 9 ชั้น มายังตึกร่มธรรม (8 ชั้น)", Wheelchair: true},
+		{FromKey: "j_er_romtham_link", ToKey: "bldg_romtham_8f", Instruction: "เข้าสู่โถงชั้นล่าง ตึกร่มธรรม (ตึก 8 ชั้น)", Wheelchair: true},
+
+		// Central Covered Walkway Spine: รังสีรักษา -> ตึกร่มเย็น (10 ชั้น) / ตึกร่มธรรม (8 ชั้น) -> ศัลยกรรม คลอดผ่าตัด
+		{FromKey: "j_walkway_north", ToKey: "j_walkway_mid", Instruction: "เดินตรงตามทางเดินมีหลังคาแกนกลางโรงพยาบาล", Wheelchair: true},
+		{FromKey: "j_walkway_mid", ToKey: "bldg_romyen_10f", Instruction: "เข้าสู่โถงชั้น 1 ตึก 10 ชั้น (ตึกร่มเย็น)", Wheelchair: true},
+		{FromKey: "j_walkway_mid", ToKey: "bldg_romtham_8f", Instruction: "ข้ามทางเดินมีหลังคาเข้าสู่ตึกร่มธรรม (ตึก 8 ชั้น)", Wheelchair: true},
+		{FromKey: "j_walkway_mid", ToKey: "j_walkway_south", Instruction: "เดินตรงตามทางเดินมีหลังคาแกนกลางลงมาทางทิศใต้", Wheelchair: true},
+		{FromKey: "j_walkway_south", ToKey: "bldg_surgery_delivery", Instruction: "เลี้ยวเข้าสู่อาคารศัลยกรรม คลอดผ่าตัด", Wheelchair: true},
+		{FromKey: "j_walkway_south", ToKey: "bldg_romtham_8f", Instruction: "เดินผ่านลานจอดรถกลางขึ้นไปยังตึกร่มธรรม (ตึก 8 ชั้น)", Wheelchair: true},
+
+		// Mid-South Zone: เภสัชกรรม, กายภาพบำบัด/แพทย์แผนไทย, พระอาจารย์ฝั้น อาจาโร, MICU/PICU, กุมารฯ, ร่มฟ้า, ร่มฉัตร
+		{FromKey: "j_walkway_south", ToKey: "bldg_micu1_obgyn", Instruction: "เดินเข้าสู่อาคารผู้ป่วยหนัก (MICU 1) / สูตินรีเวช", Wheelchair: true},
+		{FromKey: "j_walkway_south", ToKey: "j_central_south", Instruction: "เดินตามทางเดินหลักลงมาโซนอาคารผู้ป่วยกลางใต้", Wheelchair: true},
+		{FromKey: "j_central_south", ToKey: "bldg_ent_sicu", Instruction: "เลี้ยวขวาเข้าสู่อาคารผู้ป่วย ตา หู คอ จมูก / ผู้ป่วยหนักศัลยกรรม", Wheelchair: true},
+		{FromKey: "bldg_ent_sicu", ToKey: "bldg_doklamduan", Instruction: "เดินต่อไปยังอาคารดอกลำดวน / อาชีวอนามัย / ห้องสมุด", Wheelchair: true},
+		{FromKey: "j_central_south", ToKey: "bldg_picu_nicu2", Instruction: "เข้าสู่อาคารผู้ป่วยหนักเด็ก (PICU / NICU 2)", Wheelchair: true},
+		{FromKey: "j_central_south", ToKey: "bldg_pharmacy", Instruction: "เลี้ยวเข้าสู่อาคารเภสัชกรรม", Wheelchair: true},
+		{FromKey: "bldg_pharmacy", ToKey: "bldg_med_equip_cssd", Instruction: "เดินต่อไปยังศูนย์เครื่องมือแพทย์ / งานจ่ายกลาง", Wheelchair: true},
+		{FromKey: "bldg_pharmacy", ToKey: "bldg_pediatrics_12", Instruction: "เดินลงมาทางทิศใต้เข้าสู่อาคารผู้ป่วยกุมารเวชกรรม 1, 2", Wheelchair: true},
+		{FromKey: "bldg_med_equip_cssd", ToKey: "bldg_physio_thai", Instruction: "เดินเชื่อมต่อไปยังอาคารกายภาพบำบัด / แพทย์แผนไทย", Wheelchair: true},
+		{FromKey: "bldg_physio_thai", ToKey: "bldg_romfah", Instruction: "เดินลงมาเข้าสู่อาคารร่มฟ้า", Wheelchair: true},
+		{FromKey: "bldg_romfah", ToKey: "bldg_romchat", Instruction: "เดินเชื่อมต่อไปยังอาคารร่มฉัตร", Wheelchair: true},
+		{FromKey: "j_central_south", ToKey: "bldg_phra_ajan_fan", Instruction: "เข้าสู่อาคารพระอาจารย์ฝั้น อาจาโร", Wheelchair: true},
+
+		// South Zone (ถนนเจริญเมือง): โบสถ์หลวงพ่อองค์ดำ, วิเคราะห์ วิจัย บำบัด, ล้างไต/X-Ray, ไตเทียมเอกชน, อาคารร่มโพธิ์, กระดูก/กายอุปกรณ์
+		{FromKey: "j_central_south", ToKey: "j_south_plaza", Instruction: "เดินตรงลงมาทางทิศใต้ผ่านโบสถ์หลวงพ่อองค์ดำสู่ฝั่งถนนเจริญเมือง", Wheelchair: true},
+		{FromKey: "j_south_plaza", ToKey: "bldg_boht_ongdam", Instruction: "เข้าสู่บริเวณโบสถ์หลวงพ่อองค์ดำ", Wheelchair: true},
+		{FromKey: "j_south_plaza", ToKey: "bldg_analysis_therapy", Instruction: "เข้าสู่อาคารวิเคราะห์ วิจัย บำบัด", Wheelchair: true},
+		{FromKey: "j_south_plaza", ToKey: "bldg_capd_xray", Instruction: "เดินไปฝั่งตะวันตกเข้าสู่อาคารล้างไตทางช่องท้อง / เอ็กซ์เรย์", Wheelchair: true},
+		{FromKey: "j_south_plaza", ToKey: "bldg_private_dialysis", Instruction: "เข้าสู่อาคารไตเทียมเอกชน ฝั่งถนนเจริญเมือง", Wheelchair: true},
+		{FromKey: "j_south_plaza", ToKey: "j_south_parking", Instruction: "เดินผ่านลานจอดรถฝั่งใต้ไปทางทิศตะวันออก", Wheelchair: true},
+		{FromKey: "j_south_parking", ToKey: "bldg_rompho", Instruction: "เข้าสู่อาคารร่มโพธิ์", Wheelchair: true},
+		{FromKey: "bldg_rompho", ToKey: "bldg_ortho_jaisawang", Instruction: "เดินต่อไปยังอาคารผู้ป่วยศัลยกรรมกระดูก / ใจสว่าง", Wheelchair: true},
+		{FromKey: "bldg_ortho_jaisawang", ToKey: "bldg_prosthetics", Instruction: "เดินต่อไปยังอาคารกายอุปกรณ์", Wheelchair: true},
+		{FromKey: "j_south_parking", ToKey: "bldg_physio_thai", Instruction: "เดินขึ้นเหนือจากลานจอดรถใต้สู่อาคารกายภาพบำบัด / แพทย์แผนไทย", Wheelchair: true},
+	}
+
+	return initialNodes, initialEdges
+}
+
+// SeedInitialBuildings populates Sakon Nakhon Hospital's official buildings, covered walkway junctions,
+// and walkable edges ONLY when the `map_nodes` table is completely empty (count == 0).
+func SeedInitialBuildings() error {
+	if DB == nil {
+		return errors.New("database connection is not initialized")
+	}
+
+	var count int64
+	if err := DB.Model(&models.MapNode{}).Count(&count).Error; err != nil {
+		return fmt.Errorf("failed to count map_nodes: %w", err)
+	}
+
+	if count > 0 {
+		log.Printf("map_nodes already contains %d record(s), skipping initial building seed", count)
+		return nil
+	}
+
+	return InsertInitialHospitalSeed(DB)
+}
+
+// InsertInitialHospitalSeed inserts the official hospital nodes and edges inside a single transaction.
+func InsertInitialHospitalSeed(db *gorm.DB) error {
+	initialNodes, initialEdges := initialHospitalSeedData()
+
+	err := db.Transaction(func(tx *gorm.DB) error {
+		keyToID := make(map[string]uint, len(initialNodes))
+
+		for _, spec := range initialNodes {
+			var createdID uint
+			if err := tx.Raw(`
+				INSERT INTO map_nodes (name, is_building, keywords, indoor_guide, image_url, lat, lng, geom)
+				VALUES (?, ?, ?, ?, '', ?, ?, ST_SetSRID(ST_MakePoint(?, ?), 4326))
+				RETURNING id
+			`,
+				spec.Name,
+				spec.IsBuilding,
+				spec.Keywords,
+				spec.IndoorGuide,
+				spec.Lat,
+				spec.Lng,
+				spec.Lng, // PostGIS ST_MakePoint(longitude, latitude)
+				spec.Lat,
+			).Scan(&createdID).Error; err != nil {
+				return fmt.Errorf("failed to insert seed node %q: %w", spec.Name, err)
+			}
+			keyToID[spec.Key] = createdID
+		}
+
+		for _, edge := range initialEdges {
+			fromID, okFrom := keyToID[edge.FromKey]
+			toID, okTo := keyToID[edge.ToKey]
+			if !okFrom || !okTo {
+				continue
+			}
+
+			if err := tx.Exec(`
+				INSERT INTO map_edges (from_node, to_node, distance_m, instruction, is_wheelchair_friendly, is_active, geom)
+				SELECT
+					a.id,
+					b.id,
+					ST_Distance(a.geom::geography, b.geom::geography),
+					?,
+					?,
+					true,
+					ST_MakeLine(a.geom, b.geom)
+				FROM map_nodes AS a, map_nodes AS b
+				WHERE a.id = ? AND b.id = ?
+			`, edge.Instruction, edge.Wheelchair, fromID, toID).Error; err != nil {
+				return fmt.Errorf("failed to insert seed edge %s -> %s: %w", edge.FromKey, edge.ToKey, err)
+			}
+		}
+
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+
+	log.Printf("Seeded initial Sakon Nakhon Hospital map data (%d nodes, %d edges)", len(initialNodes), len(initialEdges))
+	return nil
+}

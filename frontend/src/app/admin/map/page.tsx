@@ -33,6 +33,7 @@ import {
   type UploadResponse,
 } from "@/lib/api";
 import type { AdminEditorMode } from "@/components/maps/AdminMapEditor";
+import type { MapViewMode } from "@/lib/hospital3d";
 
 const AdminMapEditor = dynamic(
   () => import("@/components/maps/AdminMapEditor"),
@@ -42,6 +43,19 @@ const AdminMapEditor = dynamic(
       <div className="w-full h-full bg-slate-100 flex flex-col items-center justify-center gap-2 text-slate-500">
         <Loader2 className="w-7 h-7 animate-spin text-[#0F766E]" />
         <span className="text-sm font-medium">กำลังโหลดแผนที่จัดการข้อมูล...</span>
+      </div>
+    ),
+  }
+);
+
+const Admin3DMapEditor = dynamic(
+  () => import("@/components/maps/Admin3DMapEditor"),
+  {
+    ssr: false,
+    loading: () => (
+      <div className="w-full h-full bg-[#E6EDF4] flex flex-col items-center justify-center gap-2 text-slate-600">
+        <Loader2 className="w-7 h-7 animate-spin text-[#0F766E]" />
+        <span className="text-sm font-medium">กำลังโหลดแผนที่ 3D ผู้ดูแลระบบ...</span>
       </div>
     ),
   }
@@ -67,6 +81,7 @@ interface DeleteConfirmState {
 export default function AdminMapPage() {
   const router = useRouter();
   const [authChecked, setAuthChecked] = useState(false);
+  const [mapViewMode, setMapViewMode] = useState<MapViewMode>("3d");
 
   const [mode, setMode] = useState<AdminEditorMode>("add_node");
   const [showSurveys, setShowSurveys] = useState(false);
@@ -532,17 +547,35 @@ export default function AdminMapPage() {
       {/* Main Editor Workspace */}
       <div className="flex-1 min-h-0 flex relative">
         <div className="flex-1 relative min-w-0">
-          <AdminMapEditor
-            mode={mode}
-            nodes={nodes}
-            edges={edges}
-            surveys={surveys}
-            showSurveys={showSurveys}
-            selectedSourceNodeId={selectedSourceNodeId}
-            onMapClick={handleMapClick}
-            onNodeClick={handleNodeClick}
-            onEdgeClick={handleEdgeClick}
-          />
+          {mapViewMode === "3d" ? (
+            <Admin3DMapEditor
+              mapViewMode={mapViewMode}
+              onChangeMapViewMode={setMapViewMode}
+              mode={mode}
+              nodes={nodes}
+              edges={edges}
+              surveys={surveys}
+              showSurveys={showSurveys}
+              selectedSourceNodeId={selectedSourceNodeId}
+              onMapClick={handleMapClick}
+              onNodeClick={handleNodeClick}
+              onEdgeClick={handleEdgeClick}
+            />
+          ) : (
+            <AdminMapEditor
+              mapViewMode={mapViewMode}
+              onChangeMapViewMode={setMapViewMode}
+              mode={mode}
+              nodes={nodes}
+              edges={edges}
+              surveys={surveys}
+              showSurveys={showSurveys}
+              selectedSourceNodeId={selectedSourceNodeId}
+              onMapClick={handleMapClick}
+              onNodeClick={handleNodeClick}
+              onEdgeClick={handleEdgeClick}
+            />
+          )}
         </div>
 
         {/* Collapsible Survey Tracks Panel when Mode 5 is active */}

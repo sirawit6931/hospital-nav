@@ -6,8 +6,9 @@ import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ArrowLeft,
+  Building2,
+  Camera,
   CheckCircle2,
-  Compass,
   Crosshair,
   Loader2,
   MapPin,
@@ -22,7 +23,9 @@ import {
   api,
   extractApiError,
   getAdminToken,
+  type MapNode,
   type SurveyTrack,
+  type UploadResponse,
 } from "@/lib/api";
 import { calculateDistanceMeters } from "@/lib/hospital";
 
@@ -49,15 +52,27 @@ export default function AdminSurveyPage() {
   const [accuracyMeters, setAccuracyMeters] = useState<number | null>(null);
   const [gpsError, setGpsError] = useState<string | null>(null);
 
+  // Track recording state
   const [isRecording, setIsRecording] = useState(false);
   const [wakeLockActive, setWakeLockActive] = useState(false);
   const [trackPoints, setTrackPoints] = useState<[number, number][]>([]);
   const [trackName, setTrackName] = useState("");
   const [isSavingTrack, setIsSavingTrack] = useState(false);
-  const [isPinningNode, setIsPinningNode] = useState(false);
-  const [quickNodeName, setQuickNodeName] = useState("");
-  const [showPinNodeBox, setShowPinNodeBox] = useState(false);
 
+  // Field Building / Point Pinning state
+  const [pinIsBuilding, setPinIsBuilding] = useState(true);
+  const [pinName, setPinName] = useState("");
+  const [pinKeywords, setPinKeywords] = useState("");
+  const [pinIndoorGuide, setPinIndoorGuide] = useState("");
+  const [pinImageUrl, setPinImageUrl] = useState("");
+  const [draftPinCoords, setDraftPinCoords] = useState<[number, number] | null>(
+    null
+  );
+  const [isUploadingPhoto, setIsUploadingPhoto] = useState(false);
+  const [isPinningNode, setIsPinningNode] = useState(false);
+
+  // Saved items lists
+  const [pinnedNodes, setPinnedNodes] = useState<MapNode[]>([]);
   const [savedSurveys, setSavedSurveys] = useState<SurveyTrack[]>([]);
   const [statusBanner, setStatusBanner] = useState<{
     type: "success" | "error";
@@ -74,10 +89,14 @@ export default function AdminSurveyPage() {
     }, 4000);
   }, []);
 
-  const loadSurveys = useCallback(async () => {
+  const loadFieldData = useCallback(async () => {
     try {
-      const res = await api.get<SurveyTrack[]>("/api/admin/surveys");
-      setSavedSurveys(Array.isArray(res.data) ? res.data : []);
+      const [nodesRes, surveysRes] = await Promise.all([
+        api.get<MapNode[]>("/api/admin/nodes"),
+        api.get<SurveyTrack[]>("/api/admin/surveys"),
+      ]);
+      setPinnedNodes(Array.isArray(nodesRes.data) ? nodesRes.data : []);
+      setSavedSurveys(Array.isArray(surveysRes.data) ? surveysRes.data : []);
     } catch {
       // Ignore silent load error on init
     }
@@ -90,8 +109,8 @@ export default function AdminSurveyPage() {
       return;
     }
     setAuthChecked(true);
-    loadSurveys();
-  }, [router, loadSurveys]);
+    loadFieldData();
+  }, [router, loadFieldData]);
 
   useEffect(() => {
     isRecordingRef.current = isRecording;
@@ -123,7 +142,6 @@ export default function AdminSurveyPage() {
               lat,
               lng
             );
-            // Filter minor GPS drift (< 2 meters) while standing still
             if (movedMeters < 2) return prev;
             return [...prev, [lat, lng]];
           });
@@ -132,8 +150,8 @@ export default function AdminSurveyPage() {
       (err) => {
         setGpsError(
           err.code === err.PERMISSION_DENIED
-            ? "กรุณาอนุญาตการเข้าถึงตำแหน่ง GPS ของเบราว์เซอร์"
-            : "ไม่สามารถรับสัญญาณ GPS ได้ กรุณาลองออกไปยังพื้นที่โล่ง"
+            ? "กรุณาอนุญาตการเข้าถึงตำแหน่ง GPS ของเบราว์เซอร์ (หรือแตะบนแผนที่เพื่อเลือกพิกัดเอง)"
+            : "ไม่สามารถรับสัญญาณ GPS ได้ สามารถแตะเลือกพิกัดบนแผนที่เพื่อปักชื่อตึกได้ทันที"
         );
       },
       {
@@ -210,6 +228,8 @@ export default function AdminSurveyPage() {
     return Math.round(sum);
   }, [trackPoints]);
 
+  const activePinCoords = draftPinCoords || currentCoords;
+
   const handleToggleRecording = () => {
     if (!isRecording) {
       if (currentCoords) {
@@ -226,38 +246,95 @@ export default function AdminSurveyPage() {
   };
 
   const handleDropPointHere = () => {
-    if (!currentCoords) {
-      notify("error", "ยังไม่มีพิกัด GPS ปัจจุบัน กรุณารอสัญญาณสักครู่");
+    const pt = activePinCoords;
+    if (!pt) {
+      notify("error", "ยังไม่มีพิกัด GPS กรุณารอสัญญาณหรือแตะบนแผนที่");
       return;
     }
-    setTrackPoints((prev) => [...prev, currentCoords]);
-    notify("success", "ปักพิกัดจุดที่ยืนลงในรอยเดินเรียบร้อยแล้ว");
+    setTrackPoints((prev) => [...prev, pt]);
+    notify("success", "ปักพิกัดลงในรอยเดินเรียบร้อยแล้ว");
   };
 
-  const handleSaveCurrentPointAsNode = async (e: React.FormEvent) => {
+  const handleUploadBuildingPhoto = async (
+    e: React.ChangeEvent<HTMLInputElement>
+  ) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    setIsUploadingPhoto(true);
+    try {
+      const formData = new FormData();
+      formData.append("file", file);
+      const res = await api.post<UploadResponse>("/api/admin/upload", formData, {
+        headers: { "Content-Type": "multipart/form-data" },
+      });
+      setPinImageUrl(res.data.image_url || res.data.url);
+      notify("success", "อัปโหลดภาพถ่ายหน้าอาคารเรียบร้อยแล้ว");
+    } catch (err) {
+      notify("error", extractApiError(err, "อัปโหลดรูปภาพไม่สำเร็จ"));
+    } finally {
+      setIsUploadingPhoto(false);
+      e.target.value = "";
+    }
+  };
+
+  const handleSaveBuildingOrPoint = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!currentCoords) {
-      notify("error", "ยังไม่มีพิกัด GPS ปัจจุบัน");
+    if (!activePinCoords) {
+      notify(
+        "error",
+        "ยังไม่มีพิกัดที่จะบันทึก กรุณารอสัญญาณ GPS หรือแตะเลือกตำแหน่งบนแผนที่"
+      );
       return;
     }
+    const trimmedName = pinName.trim();
+    if (!trimmedName) {
+      notify(
+        "error",
+        pinIsBuilding
+          ? "กรุณากรอกชื่อตึก/อาคารก่อนบันทึก"
+          : "กรุณากรอกชื่อจุดทางแยกก่อนบันทึก"
+      );
+      return;
+    }
+
     setIsPinningNode(true);
     try {
-      await api.post("/api/admin/nodes", {
-        name: quickNodeName.trim() || "จุดสำรวจภาคสนาม",
-        is_building: false,
-        keywords: "",
-        indoor_guide: "",
-        image_url: "",
-        lat: currentCoords[0],
-        lng: currentCoords[1],
+      const res = await api.post<MapNode>("/api/admin/nodes", {
+        name: trimmedName,
+        is_building: pinIsBuilding,
+        keywords: pinIsBuilding ? pinKeywords.trim() : "",
+        indoor_guide: pinIsBuilding ? pinIndoorGuide.trim() : "",
+        image_url: pinIsBuilding ? pinImageUrl.trim() : "",
+        lat: activePinCoords[0],
+        lng: activePinCoords[1],
       });
-      setQuickNodeName("");
-      setShowPinNodeBox(false);
-      notify("success", "บันทึกจุดที่ยืนเป็น Node บนแผนที่หลักเรียบร้อยแล้ว");
+      setPinnedNodes((prev) => [res.data, ...prev]);
+      setPinName("");
+      setPinKeywords("");
+      setPinIndoorGuide("");
+      setPinImageUrl("");
+      setDraftPinCoords(null);
+      notify(
+        "success",
+        pinIsBuilding
+          ? `บันทึกอาคาร "${res.data.name}" ลงแผนที่หลัก (2D/3D) เรียบร้อยแล้ว`
+          : `บันทึกจุดทางแยก "${res.data.name}" เรียบร้อยแล้ว`
+      );
     } catch (err) {
       notify("error", extractApiError(err, "ไม่สามารถบันทึกจุดได้"));
     } finally {
       setIsPinningNode(false);
+    }
+  };
+
+  const handleDeletePinnedNode = async (node: MapNode) => {
+    try {
+      await api.delete(`/api/admin/nodes/${node.id}`);
+      setPinnedNodes((prev) => prev.filter((n) => n.id !== node.id));
+      notify("success", `ลบ "${node.name || `จุด #${node.id}`}" ออกจากระบบแล้ว`);
+    } catch (err) {
+      notify("error", extractApiError(err, "ลบจุดไม่สำเร็จ"));
     }
   };
 
@@ -314,10 +391,21 @@ export default function AdminSurveyPage() {
     accuracyMeters === null
       ? { label: "รอสัญญาณ", cls: "bg-slate-100 text-slate-600" }
       : accuracyMeters <= 10
-      ? { label: `แม่นยำมาก ±${accuracyMeters} ม.`, cls: "bg-[#CCFBF1] text-[#047857]" }
+      ? {
+          label: `แม่นยำมาก ±${accuracyMeters} ม.`,
+          cls: "bg-[#CCFBF1] text-[#047857]",
+        }
       : accuracyMeters <= 25
-      ? { label: `ปานกลาง ±${accuracyMeters} ม.`, cls: "bg-amber-100 text-amber-800" }
-      : { label: `สัญญาณอ่อน ±${accuracyMeters} ม.`, cls: "bg-[#FFE4E6] text-[#BE123C]" };
+      ? {
+          label: `ปานกลาง ±${accuracyMeters} ม.`,
+          cls: "bg-amber-100 text-amber-800",
+        }
+      : {
+          label: `สัญญาณอ่อน ±${accuracyMeters} ม.`,
+          cls: "bg-[#FFE4E6] text-[#BE123C]",
+        };
+
+  const buildingList = pinnedNodes.filter((n) => n.is_building);
 
   return (
     <div className="min-h-dvh bg-[#F8FAFC] flex flex-col">
@@ -336,7 +424,7 @@ export default function AdminSurveyPage() {
               เก็บพิกัดภาคสนาม (GPS Survey)
             </h1>
             <p className="text-xs text-slate-500 truncate">
-              เดินบันทึกรอยทางเดินจริงสำหรับวาดแผนที่ รพ.สกลนคร
+              ปักจุดใส่ชื่อตึก &amp; เดินบันทึกรอยทางเดินจริง รพ.สกลนคร
             </p>
           </div>
         </div>
@@ -378,12 +466,12 @@ export default function AdminSurveyPage() {
           </div>
         )}
 
-        {/* Live GPS Telemetry Card */}
+        {/* Live GPS Telemetry & Interactive Satellite Map */}
         <section className="rounded-2xl bg-white border border-slate-200 p-4 space-y-3 shadow-xs">
           <div className="flex items-center justify-between gap-2">
             <div className="flex items-center gap-2 text-sm font-bold text-[#0F172A]">
               <Crosshair className="w-4 h-4 text-[#0F766E]" />
-              <span>สถานะสัญญาณ GPS ปัจจุบัน</span>
+              <span>สัญญาณ GPS และแผนที่ภาคสนาม</span>
             </div>
             <span
               className={`px-2.5 py-1 rounded-lg text-xs font-bold ${accuracyBadge.cls}`}
@@ -395,20 +483,20 @@ export default function AdminSurveyPage() {
           <div className="grid grid-cols-3 gap-2 text-center">
             <div className="rounded-xl bg-slate-50 border border-slate-100 p-2.5">
               <div className="text-[11px] font-semibold text-slate-500">
-                พิกัดปัจจุบัน
+                พิกัดที่เลือก
               </div>
               <div className="text-xs font-bold text-[#0F172A] mt-1 font-mono">
-                {currentCoords
-                  ? `${currentCoords[0].toFixed(5)}, ${currentCoords[1].toFixed(
+                {activePinCoords
+                  ? `${activePinCoords[0].toFixed(5)}, ${activePinCoords[1].toFixed(
                       5
                     )}`
-                  : "กำลังค้นหา..."}
+                  : "รอสัญญาณ..."}
               </div>
             </div>
 
             <div className="rounded-xl bg-slate-50 border border-slate-100 p-2.5">
               <div className="text-[11px] font-semibold text-slate-500">
-                จุดที่บันทึก
+                จุดในรอยเดิน
               </div>
               <div className="font-heading text-lg font-bold text-[#0F766E]">
                 {trackPoints.length}
@@ -425,117 +513,257 @@ export default function AdminSurveyPage() {
             </div>
           </div>
 
-          {/* Live Mini Satellite Map */}
-          <div className="h-56 w-full rounded-xl overflow-hidden border border-slate-200">
+          {/* Live Interactive Satellite Map (tap map to adjust pin position) */}
+          <div className="h-64 w-full rounded-xl overflow-hidden border border-slate-200 relative">
             <SurveyLiveMap
               currentCoords={currentCoords}
               accuracyMeters={accuracyMeters}
               trackPoints={trackPoints}
+              pinnedNodes={pinnedNodes}
+              draftPinCoords={draftPinCoords}
+              onMapTapToAdjustPin={(lat, lng) => setDraftPinCoords([lat, lng])}
             />
+          </div>
+
+          <div className="flex items-center justify-between gap-2 text-xs text-slate-500">
+            <span>
+              แตะบนแผนที่เพื่อปรับตำแหน่งหมุดให้ตรงหลังคาตึก หรือใช้พิกัด GPS ที่ยืนอยู่
+            </span>
+            {draftPinCoords && (
+              <button
+                type="button"
+                onClick={() => setDraftPinCoords(null)}
+                className="shrink-0 font-bold text-[#0F766E] hover:underline cursor-pointer"
+              >
+                กลับใช้พิกัด GPS
+              </button>
+            )}
           </div>
         </section>
 
-        {/* Primary Field Action Controls */}
-        <section className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-          <button
-            type="button"
-            onClick={handleToggleRecording}
-            className={`min-h-[54px] px-4 rounded-2xl text-base font-bold flex items-center justify-center gap-2.5 shadow-sm transition-colors cursor-pointer ${
-              isRecording
-                ? "bg-[#BE123C] hover:bg-rose-800 text-white"
-                : "bg-[#0F766E] hover:bg-[#115E59] text-white"
-            }`}
-          >
-            {isRecording ? (
-              <>
-                <Square className="w-5 h-5 fill-current" />
-                <span>หยุดบันทึกรอยเดิน</span>
-              </>
-            ) : (
-              <>
-                <Play className="w-5 h-5 fill-current" />
-                <span>เริ่มบันทึกรอยเดิน</span>
-              </>
-            )}
-          </button>
-
-          <button
-            type="button"
-            onClick={handleDropPointHere}
-            disabled={!currentCoords}
-            className="min-h-[54px] px-4 rounded-2xl bg-white border-2 border-[#0F766E] text-[#0F766E] hover:bg-teal-50 disabled:opacity-50 text-base font-bold flex items-center justify-center gap-2 cursor-pointer transition-colors"
-          >
-            <MapPin className="w-5 h-5" />
-            <span>ปักจุดที่ยืนลงเส้น</span>
-          </button>
-        </section>
-
-        {/* Quick Pin Point directly as MapNode */}
-        <section className="rounded-2xl bg-white border border-slate-200 p-4 space-y-3">
+        {/* ========== SECTION 1: ADD BUILDING / POINT WITH NAME ========== */}
+        <section className="rounded-2xl bg-white border-2 border-teal-200 p-4 space-y-3.5 shadow-xs">
           <div className="flex items-center justify-between gap-2">
             <div className="flex items-center gap-2">
-              <Compass className="w-4 h-4 text-[#0F766E]" />
-              <h2 className="font-heading text-sm font-bold text-[#0F172A]">
-                ปักหมุดจุดสำคัญลงแผนที่หลักทันที
-              </h2>
+              <div className="w-9 h-9 rounded-xl bg-[#0F766E] text-white flex items-center justify-center shrink-0">
+                <Building2 className="w-5 h-5" />
+              </div>
+              <div>
+                <h2 className="font-heading text-sm font-bold text-[#0F172A]">
+                  ปักจุดและใส่ชื่อตึกภาคสนาม
+                </h2>
+                <p className="text-xs text-slate-500">
+                  บันทึกตรงเข้าฐานข้อมูลแผนที่หลัก (2D และ 3D) ทันที
+                </p>
+              </div>
             </div>
+          </div>
+
+          {/* Type Toggle: Building vs Walkway Junction */}
+          <div className="grid grid-cols-2 gap-2">
             <button
               type="button"
-              onClick={() => setShowPinNodeBox((prev) => !prev)}
-              className="text-xs font-bold text-[#0F766E] hover:underline cursor-pointer"
+              onClick={() => setPinIsBuilding(true)}
+              className={`min-h-[46px] px-3 rounded-xl border text-sm font-bold flex items-center justify-center gap-2 transition-colors cursor-pointer ${
+                pinIsBuilding
+                  ? "bg-[#0F766E] border-[#0F766E] text-white shadow-xs"
+                  : "bg-slate-50 border-slate-200 text-slate-700 hover:bg-teal-50"
+              }`}
             >
-              {showPinNodeBox ? "ซ่อน" : "เปิดฟอร์ม"}
+              <Building2 className="w-4 h-4" />
+              <span>เพิ่มตึก / อาคาร</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => setPinIsBuilding(false)}
+              className={`min-h-[46px] px-3 rounded-xl border text-sm font-bold flex items-center justify-center gap-2 transition-colors cursor-pointer ${
+                !pinIsBuilding
+                  ? "bg-[#1D4ED8] border-[#1D4ED8] text-white shadow-xs"
+                  : "bg-slate-50 border-slate-200 text-slate-700 hover:bg-blue-50"
+              }`}
+            >
+              <MapPin className="w-4 h-4" />
+              <span>เพิ่มจุดทางแยก</span>
             </button>
           </div>
 
-          {showPinNodeBox && (
-            <form
-              onSubmit={handleSaveCurrentPointAsNode}
-              className="flex flex-col sm:flex-row gap-2"
-            >
+          <form onSubmit={handleSaveBuildingOrPoint} className="space-y-3">
+            {/* Building / Point Name */}
+            <div>
+              <label className="block text-xs font-bold text-slate-700 mb-1">
+                {pinIsBuilding ? "ชื่อตึก / อาคาร *" : "ชื่อจุดทางแยก / ทางเข้า *"}
+              </label>
               <input
                 type="text"
-                value={quickNodeName}
-                onChange={(e) => setQuickNodeName(e.target.value)}
-                placeholder="ชื่อจุด เช่น ทางแยกหน้าห้องยา, ทางขึ้นลิฟต์"
-                className="flex-1 min-h-[46px] px-3.5 rounded-xl bg-slate-50 border border-slate-200 text-sm focus:bg-white focus:outline-none focus:border-[#0F766E]"
+                required
+                value={pinName}
+                onChange={(e) => setPinName(e.target.value)}
+                placeholder={
+                  pinIsBuilding
+                    ? "เช่น ตึก 10 ชั้น (ตึกร่มเย็น), อาคารรังสีรักษา"
+                    : "เช่น ทางแยกหน้าป้อม รปภ., ทางเข้าลิฟต์ด้านข้าง"
+                }
+                className="w-full min-h-[48px] px-3.5 rounded-xl bg-slate-50 border border-slate-200 text-sm text-[#0F172A] focus:bg-white focus:outline-none focus:border-[#0F766E]"
               />
-              <button
-                type="submit"
-                disabled={isPinningNode || !currentCoords}
-                className="min-h-[46px] px-4 rounded-xl bg-[#047857] hover:bg-emerald-800 disabled:opacity-50 text-white text-sm font-semibold inline-flex items-center justify-center gap-2 cursor-pointer"
-              >
-                {isPinningNode ? (
-                  <Loader2 className="w-4 h-4 animate-spin" />
-                ) : (
-                  <MapPin className="w-4 h-4" />
-                )}
-                <span>บันทึก Node</span>
-              </button>
-            </form>
-          )}
+            </div>
+
+            {pinIsBuilding && (
+              <>
+                {/* Keywords / Departments */}
+                <div>
+                  <label className="block text-xs font-bold text-slate-700 mb-1">
+                    แผนก / คำค้นหาภายในตึก (คั่นด้วยจุลภาค)
+                  </label>
+                  <input
+                    type="text"
+                    value={pinKeywords}
+                    onChange={(e) => setPinKeywords(e.target.value)}
+                    placeholder="เช่น NICU, PICU, ตา, หู คอ จมูก, จุดชำระเงิน, รับยา"
+                    className="w-full min-h-[46px] px-3.5 rounded-xl bg-slate-50 border border-slate-200 text-sm text-[#0F172A] focus:bg-white focus:outline-none focus:border-[#0F766E]"
+                  />
+                </div>
+
+                {/* Indoor Guide */}
+                <div>
+                  <label className="block text-xs font-bold text-slate-700 mb-1">
+                    คำแนะนำรายชั้น / ภายในอาคาร (Indoor Guide)
+                  </label>
+                  <textarea
+                    rows={2}
+                    value={pinIndoorGuide}
+                    onChange={(e) => setPinIndoorGuide(e.target.value)}
+                    placeholder="เช่น ชั้น 1 รับยาและชำระเงิน, ชั้น 2 คลินิกผิวหนัง"
+                    className="w-full px-3.5 py-2.5 rounded-xl bg-slate-50 border border-slate-200 text-sm text-[#0F172A] focus:bg-white focus:outline-none focus:border-[#0F766E]"
+                  />
+                </div>
+
+                {/* Take / Upload Building Front Photo */}
+                <div className="space-y-2">
+                  <div className="flex items-center gap-2">
+                    <label className="min-h-[44px] px-3.5 rounded-xl bg-slate-100 hover:bg-teal-50 border border-slate-200 hover:border-teal-300 text-xs font-bold text-slate-800 inline-flex items-center gap-2 cursor-pointer">
+                      {isUploadingPhoto ? (
+                        <Loader2 className="w-4 h-4 animate-spin text-[#0F766E]" />
+                      ) : (
+                        <Camera className="w-4 h-4 text-[#0F766E]" />
+                      )}
+                      <span>
+                        {isUploadingPhoto
+                          ? "กำลังอัปโหลด..."
+                          : "ถ่ายภาพ / แนบรูปหน้าตึก"}
+                      </span>
+                      <input
+                        type="file"
+                        accept="image/*"
+                        capture="environment"
+                        onChange={handleUploadBuildingPhoto}
+                        disabled={isUploadingPhoto}
+                        className="hidden"
+                      />
+                    </label>
+                    {pinImageUrl && (
+                      <button
+                        type="button"
+                        onClick={() => setPinImageUrl("")}
+                        className="text-xs font-semibold text-rose-600 hover:underline cursor-pointer"
+                      >
+                        ลบรูป
+                      </button>
+                    )}
+                  </div>
+
+                  {pinImageUrl && (
+                    <div className="rounded-xl overflow-hidden border border-slate-200">
+                      {/* eslint-disable-next-line @next/next/no-img-element */}
+                      <img
+                        src={pinImageUrl}
+                        alt="ตัวอย่างภาพหน้าอาคาร"
+                        className="w-full h-32 object-cover"
+                      />
+                    </div>
+                  )}
+                </div>
+              </>
+            )}
+
+            <button
+              type="submit"
+              disabled={isPinningNode || !activePinCoords}
+              className={`w-full min-h-[50px] px-4 rounded-xl disabled:opacity-50 text-white text-sm font-bold flex items-center justify-center gap-2 shadow-sm transition-colors cursor-pointer ${
+                pinIsBuilding
+                  ? "bg-[#047857] hover:bg-emerald-800"
+                  : "bg-[#1D4ED8] hover:bg-blue-800"
+              }`}
+            >
+              {isPinningNode ? (
+                <Loader2 className="w-4 h-4 animate-spin" />
+              ) : pinIsBuilding ? (
+                <Building2 className="w-4 h-4" />
+              ) : (
+                <MapPin className="w-4 h-4" />
+              )}
+              <span>
+                {pinIsBuilding
+                  ? "บันทึกตึกนี้ลงแผนที่หลัก"
+                  : "บันทึกจุดทางแยกนี้ลงแผนที่หลัก"}
+              </span>
+            </button>
+          </form>
         </section>
 
-        {/* Save Recorded Survey Track Form */}
+        {/* ========== SECTION 2: WALKING TRACK RECORDER ========== */}
         <section className="rounded-2xl bg-white border border-slate-200 p-4 space-y-3">
           <h2 className="font-heading text-sm font-bold text-[#0F172A]">
-            บันทึกรอยเดินเข้าระบบ (Survey Track)
+            บันทึกรอยเดินสำรวจทางเดิน (Survey Track)
           </h2>
 
-          <form onSubmit={handleSaveSurveyTrack} className="space-y-3">
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+            <button
+              type="button"
+              onClick={handleToggleRecording}
+              className={`min-h-[52px] px-4 rounded-xl text-sm font-bold flex items-center justify-center gap-2 shadow-sm transition-colors cursor-pointer ${
+                isRecording
+                  ? "bg-[#BE123C] hover:bg-rose-800 text-white"
+                  : "bg-[#0F766E] hover:bg-[#115E59] text-white"
+              }`}
+            >
+              {isRecording ? (
+                <>
+                  <Square className="w-4 h-4 fill-current" />
+                  <span>หยุดบันทึกรอยเดิน</span>
+                </>
+              ) : (
+                <>
+                  <Play className="w-4 h-4 fill-current" />
+                  <span>เริ่มบันทึกรอยเดิน</span>
+                </>
+              )}
+            </button>
+
+            <button
+              type="button"
+              onClick={handleDropPointHere}
+              disabled={!activePinCoords}
+              className="min-h-[52px] px-4 rounded-xl bg-white border-2 border-[#0F766E] text-[#0F766E] hover:bg-teal-50 disabled:opacity-50 text-sm font-bold flex items-center justify-center gap-2 cursor-pointer transition-colors"
+            >
+              <MapPin className="w-4 h-4" />
+              <span>เพิ่มจุดลงรอยเดิน</span>
+            </button>
+          </div>
+
+          <form onSubmit={handleSaveSurveyTrack} className="space-y-2.5 pt-1">
             <input
               type="text"
               value={trackName}
               onChange={(e) => setTrackName(e.target.value)}
-              placeholder="ตั้งชื่อเส้นทางสำรวจ เช่น หน้าตึก ER ถึง ตึก 8 ชั้น"
-              className="w-full min-h-[48px] px-3.5 rounded-xl bg-slate-50 border border-slate-200 text-sm text-[#0F172A] focus:bg-white focus:outline-none focus:border-[#0F766E]"
+              placeholder="ตั้งชื่อเส้นทางสำรวจ เช่น หน้าตึก ER ถึง ตึก 10 ชั้น ร่มเย็น"
+              className="w-full min-h-[46px] px-3.5 rounded-xl bg-slate-50 border border-slate-200 text-sm text-[#0F172A] focus:bg-white focus:outline-none focus:border-[#0F766E]"
             />
 
             <div className="flex items-center gap-2">
               <button
                 type="submit"
                 disabled={isSavingTrack || trackPoints.length < 2}
-                className="flex-1 min-h-[48px] px-4 rounded-xl bg-[#0F766E] hover:bg-[#115E59] disabled:opacity-50 text-white text-sm font-bold flex items-center justify-center gap-2 cursor-pointer"
+                className="flex-1 min-h-[46px] px-4 rounded-xl bg-[#0F766E] hover:bg-[#115E59] disabled:opacity-50 text-white text-sm font-bold flex items-center justify-center gap-2 cursor-pointer"
               >
                 {isSavingTrack ? (
                   <Loader2 className="w-4 h-4 animate-spin" />
@@ -549,7 +777,7 @@ export default function AdminSurveyPage() {
                 <button
                   type="button"
                   onClick={() => setTrackPoints([])}
-                  className="min-h-[48px] px-3.5 rounded-xl border border-rose-200 text-rose-700 hover:bg-rose-50 text-sm font-semibold cursor-pointer"
+                  className="min-h-[46px] px-3.5 rounded-xl border border-rose-200 text-rose-700 hover:bg-rose-50 text-sm font-semibold cursor-pointer"
                 >
                   ล้างจุด
                 </button>
@@ -558,7 +786,46 @@ export default function AdminSurveyPage() {
           </form>
         </section>
 
-        {/* Previously Saved Tracks List */}
+        {/* ========== SECTION 3: PINNED BUILDINGS IN SYSTEM ========== */}
+        <section className="rounded-2xl bg-white border border-slate-200 p-4 space-y-3">
+          <h2 className="font-heading text-sm font-bold text-[#0F172A]">
+            อาคารที่ปักพิกัดไว้ในระบบ ({buildingList.length} อาคาร)
+          </h2>
+
+          {buildingList.length === 0 ? (
+            <p className="text-xs text-slate-500 py-2">
+              ยังไม่มีอาคารที่บันทึกไว้
+            </p>
+          ) : (
+            <div className="space-y-2 max-h-64 overflow-y-auto pr-1">
+              {buildingList.map((node) => (
+                <div
+                  key={node.id}
+                  className="rounded-xl bg-slate-50 border border-slate-200 px-3.5 py-2.5 flex items-center justify-between gap-2"
+                >
+                  <div className="min-w-0">
+                    <p className="text-sm font-bold text-[#0F172A] truncate">
+                      {node.name || `อาคาร #${node.id}`}
+                    </p>
+                    <p className="text-[11px] text-slate-500 font-mono">
+                      {node.lat.toFixed(5)}, {node.lng.toFixed(5)}
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => handleDeletePinnedNode(node)}
+                    className="min-h-[40px] min-w-[40px] rounded-lg hover:bg-rose-100 text-rose-600 flex items-center justify-center shrink-0 cursor-pointer"
+                    aria-label={`ลบ ${node.name}`}
+                  >
+                    <Trash2 className="w-4 h-4" />
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
+        </section>
+
+        {/* ========== SECTION 4: SAVED SURVEY TRACKS ========== */}
         <section className="rounded-2xl bg-white border border-slate-200 p-4 space-y-3">
           <h2 className="font-heading text-sm font-bold text-[#0F172A]">
             รอยเดินที่บันทึกไว้ในระบบ ({savedSurveys.length})

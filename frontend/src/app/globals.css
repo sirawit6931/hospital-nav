@@ -102,3 +102,16 @@ h3,
 .gps-user-dot {
   animation: gps-pulse 2s infinite;
 }
+
+/* MapLibre GL JS clean healthcare controls */
+.maplibregl-ctrl-group {
+  border-radius: 12px !important;
+  border: 1px solid #CBD5E1 !important;
+  overflow: hidden;
+  box-shadow: 0 4px 12px rgba(15, 23, 42, 0.12) !important;
+}
+
+.maplibregl-ctrl-group button {
+  width: 38px !important;
+  height: 38px !important;
+}

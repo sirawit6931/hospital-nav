@@ -1,7 +1,7 @@
 "use client";
 
 import "leaflet/dist/leaflet.css";
-import { useMemo, useState } from "react";
+import { useMemo } from "react";
 import L from "leaflet";
 import {
   MapContainer,
@@ -11,7 +11,7 @@ import {
   Tooltip,
   useMapEvents,
 } from "react-leaflet";
-import { Layers } from "lucide-react";
+import { Box, Globe, Map as MapIcon } from "lucide-react";
 import type { MapEdge, MapNode, SurveyTrack } from "@/lib/api";
 import {
   ESRI_SATELLITE_ATTRIBUTION,
@@ -21,6 +21,7 @@ import {
   OSM_STREET_ATTRIBUTION,
   OSM_STREET_URL,
 } from "@/lib/hospital";
+import type { MapViewMode } from "@/lib/hospital3d";
 
 export type AdminEditorMode =
   | "add_node"
@@ -29,6 +30,8 @@ export type AdminEditorMode =
   | "delete";
 
 interface AdminMapEditorProps {
+  mapViewMode: MapViewMode;
+  onChangeMapViewMode: (mode: MapViewMode) => void;
   mode: AdminEditorMode;
   nodes: MapNode[];
   edges: MapEdge[];
@@ -89,6 +92,8 @@ function MapClickListener({
 }
 
 export default function AdminMapEditor({
+  mapViewMode,
+  onChangeMapViewMode,
   mode,
   nodes,
   edges,
@@ -99,8 +104,6 @@ export default function AdminMapEditor({
   onNodeClick,
   onEdgeClick,
 }: AdminMapEditorProps) {
-  const [mapStyle, setMapStyle] = useState<"satellite" | "street">("satellite");
-
   const nodeById = useMemo(() => {
     const map = new Map<number, MapNode>();
     for (const n of nodes) {
@@ -114,26 +117,29 @@ export default function AdminMapEditor({
       <MapContainer
         center={HOSPITAL_CENTER}
         zoom={HOSPITAL_DEFAULT_ZOOM}
-        maxZoom={21}
+        maxZoom={20}
+        zoomSnap={0.25}
+        zoomDelta={0.5}
+        wheelPxPerZoomLevel={120}
         className={`w-full h-full z-0 ${
           mode === "add_node" ? "cursor-crosshair" : ""
         }`}
       >
-        {mapStyle === "satellite" ? (
-          <TileLayer
-            key="admin-esri"
-            url={ESRI_SATELLITE_URL}
-            attribution={ESRI_SATELLITE_ATTRIBUTION}
-            maxZoom={21}
-            maxNativeZoom={19}
-          />
-        ) : (
+        {mapViewMode === "street" ? (
           <TileLayer
             key="admin-osm"
             url={OSM_STREET_URL}
             attribution={OSM_STREET_ATTRIBUTION}
-            maxZoom={21}
+            maxZoom={20}
             maxNativeZoom={19}
+          />
+        ) : (
+          <TileLayer
+            key="admin-esri"
+            url={ESRI_SATELLITE_URL}
+            attribution={ESRI_SATELLITE_ATTRIBUTION}
+            maxZoom={20}
+            maxNativeZoom={18}
           />
         )}
 
@@ -248,19 +254,49 @@ export default function AdminMapEditor({
         })}
       </MapContainer>
 
-      {/* Layer toggle button */}
-      <button
-        type="button"
-        onClick={() =>
-          setMapStyle((prev) =>
-            prev === "satellite" ? "street" : "satellite"
-          )
-        }
-        className="absolute top-3 right-3 z-[400] min-h-[44px] px-3.5 rounded-xl bg-white/95 backdrop-blur border border-slate-200 shadow-md hover:bg-slate-50 text-xs font-bold text-[#0F172A] flex items-center gap-2 cursor-pointer"
+      {/* 3-Mode Map Switcher */}
+      <div
+        role="group"
+        aria-label="เลือกโหมดแผนที่ผู้ดูแล"
+        className="absolute top-3 right-3 z-[400] inline-flex items-center p-1 rounded-xl bg-white/95 backdrop-blur border border-slate-200 shadow-md"
       >
-        <Layers className="w-4 h-4 text-[#0F766E]" />
-        <span>{mapStyle === "satellite" ? "แผนที่ถนน" : "ภาพดาวเทียม"}</span>
-      </button>
+        <button
+          type="button"
+          onClick={() => onChangeMapViewMode("3d")}
+          className={`min-h-[38px] px-3 rounded-lg text-xs font-bold flex items-center gap-1.5 transition-colors cursor-pointer ${
+            mapViewMode === "3d"
+              ? "bg-[#0F766E] text-white shadow-xs"
+              : "text-slate-600 hover:bg-slate-100"
+          }`}
+        >
+          <Box className="w-3.5 h-3.5" />
+          <span>แผนที่ 3D</span>
+        </button>
+        <button
+          type="button"
+          onClick={() => onChangeMapViewMode("satellite")}
+          className={`min-h-[38px] px-3 rounded-lg text-xs font-bold flex items-center gap-1.5 transition-colors cursor-pointer ${
+            mapViewMode === "satellite"
+              ? "bg-[#0F766E] text-white shadow-xs"
+              : "text-slate-600 hover:bg-slate-100"
+          }`}
+        >
+          <Globe className="w-3.5 h-3.5" />
+          <span>ดาวเทียม</span>
+        </button>
+        <button
+          type="button"
+          onClick={() => onChangeMapViewMode("street")}
+          className={`min-h-[38px] px-3 rounded-lg text-xs font-bold flex items-center gap-1.5 transition-colors cursor-pointer ${
+            mapViewMode === "street"
+              ? "bg-[#0F766E] text-white shadow-xs"
+              : "text-slate-600 hover:bg-slate-100"
+          }`}
+        >
+          <MapIcon className="w-3.5 h-3.5" />
+          <span>แผนที่ถนน</span>
+        </button>
+      </div>
 
       {/* Bottom Legend */}
       <div className="absolute bottom-4 left-4 z-[400] rounded-xl bg-white/95 backdrop-blur border border-slate-200 shadow-md px-3.5 py-2 flex flex-wrap items-center gap-4 text-xs font-semibold text-slate-700">

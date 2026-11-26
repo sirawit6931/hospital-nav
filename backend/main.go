@@ -99,6 +99,10 @@ func main() {
 		log.Fatalf("Admin seed error: %v", err)
 	}
 
+	if err := config.SeedInitialBuildings(); err != nil {
+		log.Fatalf("Initial buildings seed error: %v", err)
+	}
+
 	// Ensure uploads directory exists for serving building photos.
 	if err := os.MkdirAll("uploads", 0o755); err != nil {
 		log.Fatalf("Failed to create uploads directory: %v", err)

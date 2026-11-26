@@ -33,7 +33,10 @@ func SearchBuildings(c *gin.Context) {
 	query := config.DB.Model(&models.MapNode{}).Where("is_building = ?", true)
 	if q != "" {
 		pattern := "%" + q + "%"
-		query = query.Where("name ILIKE ? OR COALESCE(keywords, '') ILIKE ?", pattern, pattern)
+		query = query.Where(
+			"name ILIKE ? OR COALESCE(keywords, '') ILIKE ? OR COALESCE(indoor_guide, '') ILIKE ?",
+			pattern, pattern, pattern,
+		)
 	}
 
 	buildings := make([]models.MapNode, 0)
