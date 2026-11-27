@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -64,38 +65,138 @@ func defaultMap3DPayload() Map3DOverridesPayload {
 	}
 }
 
-// GetMap3DOverrides returns saved 3D model customizations for both public & admin maps.
-func GetMap3DOverrides(c *gin.Context) {
-	map3DMu.RLock()
-	defer map3DMu.RUnlock()
+func map3DVersionFilePath(versionID uint) string {
+	return fmt.Sprintf("uploads/custom_3d_overrides_v%d.json", versionID)
+}
 
-	data, err := os.ReadFile(map3DOverridesFile)
-	if err != nil {
-		if os.IsNotExist(err) {
-			c.JSON(http.StatusOK, defaultMap3DPayload())
-			return
+func readMap3DPayloadUnlocked(versionID uint) (Map3DOverridesPayload, error) {
+	paths := []string{map3DVersionFilePath(versionID)}
+	if liveID, err := ResolveLiveVersionID(); err == nil && liveID == versionID {
+		paths = append(paths, map3DOverridesFile)
+	}
+
+	for _, p := range paths {
+		data, err := os.ReadFile(p)
+		if err != nil {
+			if os.IsNotExist(err) {
+				continue
+			}
+			return defaultMap3DPayload(), err
 		}
+		var payload Map3DOverridesPayload
+		if err := json.Unmarshal(data, &payload); err != nil {
+			return defaultMap3DPayload(), nil
+		}
+		if payload.Overrides == nil {
+			payload.Overrides = map[string]Building3DOverride{}
+		}
+		if payload.CustomParts == nil {
+			payload.CustomParts = []Custom3DPart{}
+		}
+		return payload, nil
+	}
+
+	return defaultMap3DPayload(), nil
+}
+
+func writeMap3DPayloadUnlocked(filePath string, payload Map3DOverridesPayload) error {
+	if err := os.MkdirAll(filepath.Dir(filePath), 0o755); err != nil {
+		return err
+	}
+	encoded, err := json.MarshalIndent(payload, "", "  ")
+	if err != nil {
+		return err
+	}
+	tmpPath := filePath + ".tmp"
+	if err := os.WriteFile(tmpPath, encoded, 0o644); err != nil {
+		return err
+	}
+	return os.Rename(tmpPath, filePath)
+}
+
+// cloneMap3DOverridesFile deep-copies 3D overrides from srcVersionID to dstVersionID
+// and remaps any linked_node_id using oldToNewNodeID.
+func cloneMap3DOverridesFile(srcVersionID, dstVersionID uint, oldToNewNodeID map[uint]uint) error {
+	map3DMu.Lock()
+	defer map3DMu.Unlock()
+
+	payload, err := readMap3DPayloadUnlocked(srcVersionID)
+	if err != nil {
+		return err
+	}
+
+	clonedOverrides := make(map[string]Building3DOverride, len(payload.Overrides))
+	for k, ov := range payload.Overrides {
+		if ov.LinkedNodeID != nil {
+			if mapped, ok := oldToNewNodeID[*ov.LinkedNodeID]; ok {
+				m := mapped
+				ov.LinkedNodeID = &m
+			} else {
+				ov.LinkedNodeID = nil
+			}
+		}
+		clonedOverrides[k] = ov
+	}
+
+	clonedParts := make([]Custom3DPart, len(payload.CustomParts))
+	for i, part := range payload.CustomParts {
+		if part.LinkedNodeID != nil {
+			if mapped, ok := oldToNewNodeID[*part.LinkedNodeID]; ok {
+				m := mapped
+				part.LinkedNodeID = &m
+			} else {
+				part.LinkedNodeID = nil
+			}
+		}
+		clonedParts[i] = part
+	}
+
+	return writeMap3DPayloadUnlocked(map3DVersionFilePath(dstVersionID), Map3DOverridesPayload{
+		Overrides:   clonedOverrides,
+		CustomParts: clonedParts,
+	})
+}
+
+// syncLiveMap3DLegacyFile keeps uploads/custom_3d_overrides.json aligned with the current Live version.
+func syncLiveMap3DLegacyFile(liveVersionID uint) {
+	map3DMu.Lock()
+	defer map3DMu.Unlock()
+
+	if payload, err := readMap3DPayloadUnlocked(liveVersionID); err == nil {
+		_ = writeMap3DPayloadUnlocked(map3DOverridesFile, payload)
+	}
+}
+
+// GetMap3DOverrides returns saved 3D model customizations for the requested version_id / preview_version_id,
+// defaulting to the current Live version for public users.
+func GetMap3DOverrides(c *gin.Context) {
+	versionID, err := ResolveRequestedVersionID(c, "version_id", "preview_version_id")
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	map3DMu.RLock()
+	payload, readErr := readMap3DPayloadUnlocked(versionID)
+	map3DMu.RUnlock()
+
+	if readErr != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "ไม่สามารถอ่านข้อมูลการปรับแต่งโมเดล 3D ได้"})
 		return
-	}
-
-	var payload Map3DOverridesPayload
-	if err := json.Unmarshal(data, &payload); err != nil {
-		c.JSON(http.StatusOK, defaultMap3DPayload())
-		return
-	}
-	if payload.Overrides == nil {
-		payload.Overrides = map[string]Building3DOverride{}
-	}
-	if payload.CustomParts == nil {
-		payload.CustomParts = []Custom3DPart{}
 	}
 
 	c.JSON(http.StatusOK, payload)
 }
 
-// SaveMap3DOverrides persists admin 3D building customizations & custom extruded wings.
+// SaveMap3DOverrides persists admin 3D building customizations & custom extruded wings
+// scoped to the specified ?version_id=... (defaults to Live version if omitted).
 func SaveMap3DOverrides(c *gin.Context) {
+	versionID, err := ResolveRequestedVersionID(c, "version_id")
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
 	var payload Map3DOverridesPayload
 	if err := c.ShouldBindJSON(&payload); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "รูปแบบข้อมูลโมเดล 3D ไม่ถูกต้อง"})
@@ -110,26 +211,16 @@ func SaveMap3DOverrides(c *gin.Context) {
 	}
 
 	map3DMu.Lock()
-	defer map3DMu.Unlock()
-
-	if err := os.MkdirAll(filepath.Dir(map3DOverridesFile), 0o755); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "ไม่สามารถสร้างโฟลเดอร์จัดเก็บข้อมูลได้"})
-		return
+	writeErr := writeMap3DPayloadUnlocked(map3DVersionFilePath(versionID), payload)
+	if writeErr == nil {
+		if liveID, liveErr := ResolveLiveVersionID(); liveErr == nil && liveID == versionID {
+			_ = writeMap3DPayloadUnlocked(map3DOverridesFile, payload)
+		}
 	}
+	map3DMu.Unlock()
 
-	encoded, err := json.MarshalIndent(payload, "", "  ")
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "ไม่สามารถเข้ารหัสข้อมูลโมเดล 3D ได้"})
-		return
-	}
-
-	tmpPath := map3DOverridesFile + ".tmp"
-	if err := os.WriteFile(tmpPath, encoded, 0o644); err != nil {
+	if writeErr != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "ไม่สามารถบันทึกข้อมูลโมเดล 3D ได้"})
-		return
-	}
-	if err := os.Rename(tmpPath, map3DOverridesFile); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "ไม่สามารถอัปเดตไฟล์โมเดล 3D ได้"})
 		return
 	}
 

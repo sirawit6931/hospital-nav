@@ -9,7 +9,7 @@ import {
   Search,
   X,
 } from "lucide-react";
-import type { MapNode } from "@/lib/api";
+import type { Category, MapNode } from "@/lib/api";
 import { classifyBuilding } from "@/lib/hospital";
 import {
   QUICK_SEARCH_TERMS,
@@ -20,6 +20,7 @@ import {
 interface BuildingSearchBarProps {
   value: string;
   allBuildings: MapNode[];
+  categories?: Category[];
   onChange: (nextValue: string) => void;
   onSubmit: (query: string) => void;
   onClear: () => void;
@@ -58,6 +59,7 @@ function HighlightMatch({ text, query }: { text: string; query: string }) {
 export default function BuildingSearchBar({
   value,
   allBuildings,
+  categories,
   onChange,
   onSubmit,
   onClear,
@@ -220,7 +222,7 @@ export default function BuildingSearchBar({
 
               <ul className="max-h-72 overflow-y-auto divide-y divide-slate-100">
                 {suggestions.map((item, idx) => {
-                  const badge = classifyBuilding(item.building);
+                  const badge = classifyBuilding(item.building, categories);
                   const isHighlighted = idx === highlightedIndex;
 
                   return (

@@ -1,4 +1,4 @@
-import type { MapNode, RouteResponse } from "./api";
+import type { Category, MapNode, RouteResponse } from "./api";
 
 // Real Sakon Nakhon Hospital campus center (OSM way/494975554, Charoen Muang Rd.)
 export const HOSPITAL_CENTER: [number, number] = [17.1633, 104.1580];
@@ -14,16 +14,12 @@ export const OSM_STREET_URL =
 export const OSM_STREET_ATTRIBUTION =
   "&copy; OpenStreetMap contributors";
 
-export type FilterCategoryId =
-  | "all"
-  | "er_opd"
-  | "specialty"
-  | "diagnostic"
-  | "maternal_child";
+export type FilterCategoryId = string;
 
 export interface FilterChipOption {
   id: FilterCategoryId;
   label: string;
+  colorHex?: string;
 }
 
 export const FILTER_CHIPS: FilterChipOption[] = [
@@ -35,8 +31,9 @@ export const FILTER_CHIPS: FilterChipOption[] = [
 ];
 
 export interface BuildingBadgeInfo {
-  category: Exclude<FilterCategoryId, "all">;
+  category: string;
   badgeLabel: string;
+  accentColor: string;
   badgeStyle: {
     text: string;
     bg: string;
@@ -45,21 +42,73 @@ export interface BuildingBadgeInfo {
   subtitle: string;
 }
 
+function getReadableTextHex(hex: string): string {
+  const clean = (hex || "").replace("#", "").trim();
+  if (!/^[0-9a-fA-F]{6}$/.test(clean)) return "#0F172A";
+  const r = parseInt(clean.slice(0, 2), 16) / 255;
+  const g = parseInt(clean.slice(2, 4), 16) / 255;
+  const b = parseInt(clean.slice(4, 6), 16) / 255;
+  const luminance = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+  // Darken bright yellow/lime/light hex colors so badge text remains WCAG-readable
+  return luminance > 0.48 ? "#713F12" : `#${clean}`;
+}
+
+function hexWithAlpha(hex: string, alphaHex = "4D"): string {
+  const clean = (hex || "").replace("#", "").trim();
+  if (!/^[0-9a-fA-F]{6}$/.test(clean)) return "#CBD5E1";
+  return `#${clean}${alphaHex}`;
+}
+
 /**
- * Classifies a hospital building node into medical categories and Healthcare UX badge colors:
- * - ER / ฉุกเฉิน: #BE123C on #FFE4E6
- * - OPD / ตึกตรวจ: #1D4ED8 on #DBEAFE
- * - ศูนย์เฉพาะทาง / ตึก 8 ชั้น: #047857 on #CCFBF1
+ * Classifies a hospital building node into medical categories and applies live Category
+ * names and colors from GET /api/categories when provided.
  */
-export function classifyBuilding(node: MapNode): BuildingBadgeInfo {
+export function classifyBuilding(
+  node: MapNode,
+  categories?: Category[]
+): BuildingBadgeInfo {
+  const customBadge = (node.badge_label || "").trim();
+
+  // 1. Honor explicit category_id from PostgreSQL first when available
+  if (node.category_id && categories && categories.length > 0) {
+    const directCat = categories.find((c) => c.id === node.category_id);
+    if (directCat) {
+      const floorPrefix = node.floor_range?.trim()
+        ? `ชั้น ${node.floor_range.trim()} • `
+        : "";
+      return {
+        category: directCat.slug,
+        badgeLabel: customBadge || directCat.name,
+        accentColor: directCat.color_hex,
+        badgeStyle: {
+          text: getReadableTextHex(directCat.color_hex),
+          bg: directCat.badge_bg,
+          border: hexWithAlpha(directCat.color_hex, "4D"),
+        },
+        subtitle: `${floorPrefix}${directCat.name}`,
+      };
+    }
+  }
+
   const nameLower = (node.name || "").toLowerCase();
-  const text = `${node.name} ${node.keywords} ${node.indoor_guide}`.toLowerCase();
+  const deptText = (node.departments || [])
+    .map((d) => `${d.name} ${d.keywords} ${d.floor}`)
+    .join(" ");
+  const text = `${node.name} ${node.keywords} ${node.indoor_guide} ${deptText}`.toLowerCase();
+
+  const hasHeartCat = Boolean(
+    categories?.some((c) => c.slug === "heart_center")
+  );
+  const hasSupportCat = Boolean(categories?.some((c) => c.slug === "support"));
+
+  let base: BuildingBadgeInfo;
 
   // Check explicit primary tower names first so keywords like "Trauma" in ตึกร่มธรรม don't misclassify it as ER
   if (nameLower.includes("10 ชั้น") || nameLower.includes("ร่มเย็น")) {
-    return {
+    base = {
       category: "maternal_child",
       badgeLabel: "ตึก 10 ชั้น",
+      accentColor: "#881337",
       badgeStyle: {
         text: "#047857",
         bg: "#CCFBF1",
@@ -67,12 +116,11 @@ export function classifyBuilding(node: MapNode): BuildingBadgeInfo {
       },
       subtitle: "ตึกร่มเย็น 10 ชั้น • เด็ก, สูติ-นรีเวช, ตา, หู คอ จมูก, พิเศษ",
     };
-  }
-
-  if (nameLower.includes("8 ชั้น") || nameLower.includes("ร่มธรรม")) {
-    return {
+  } else if (nameLower.includes("8 ชั้น") || nameLower.includes("ร่มธรรม")) {
+    base = {
       category: "specialty",
       badgeLabel: "ตึก 8 ชั้น",
+      accentColor: "#EAB308",
       badgeStyle: {
         text: "#047857",
         bg: "#CCFBF1",
@@ -80,12 +128,11 @@ export function classifyBuilding(node: MapNode): BuildingBadgeInfo {
       },
       subtitle: "ตึกร่มธรรม 8 ชั้น • หอผู้ป่วยใน, MICU, Stroke, Trauma",
     };
-  }
-
-  if (nameLower.includes("หัวใจเพื่อแผ่นดิน")) {
-    return {
-      category: "specialty",
+  } else if (nameLower.includes("หัวใจเพื่อแผ่นดิน")) {
+    base = {
+      category: hasHeartCat ? "heart_center" : "specialty",
       badgeLabel: "ศูนย์หัวใจ",
+      accentColor: "#4A83B4",
       badgeStyle: {
         text: "#1D4ED8",
         bg: "#DBEAFE",
@@ -93,17 +140,16 @@ export function classifyBuilding(node: MapNode): BuildingBadgeInfo {
       },
       subtitle: "ชั้น 1 จุดชำระเงิน / รับยา • ศูนย์หัวใจ, CICU, OR, ฟอกไต",
     };
-  }
-
-  if (
+  } else if (
     nameLower.includes("ฉุกเฉิน") ||
     nameLower.includes("อุบัติเหตุ") ||
     /\ber\b/.test(nameLower) ||
     text.includes("ห้องอุบัติเหตุฉุกเฉิน")
   ) {
-    return {
+    base = {
       category: "er_opd",
       badgeLabel: "ER / OPD",
+      accentColor: "#A61B29",
       badgeStyle: {
         text: "#BE123C",
         bg: "#FFE4E6",
@@ -111,16 +157,15 @@ export function classifyBuilding(node: MapNode): BuildingBadgeInfo {
       },
       subtitle: "ตึก 9 ชั้น • ฉุกเฉิน 24 ชม., ผิวหนัง, สูติฯ, ตา, หู คอ จมูก",
     };
-  }
-
-  if (
+  } else if (
     nameLower.includes("วิเคราะห์") ||
     nameLower.includes("ล้างไต") ||
     nameLower.includes("ไตเทียม")
   ) {
-    return {
+    base = {
       category: "diagnostic",
       badgeLabel: "ตรวจ / ไตเทียม",
+      accentColor: "#1F8A70",
       badgeStyle: {
         text: "#1D4ED8",
         bg: "#DBEAFE",
@@ -128,17 +173,16 @@ export function classifyBuilding(node: MapNode): BuildingBadgeInfo {
       },
       subtitle: "อาคารตรวจวิเคราะห์ ห้องปฏิบัติการ ล้างไต และเอ็กซ์เรย์",
     };
-  }
-
-  if (
+  } else if (
     text.includes("ผู้ป่วยนอก") ||
     text.includes("ห้องบัตร") ||
     text.includes("ตรวจโรคทั่วไป") ||
     /\bopd\b/.test(text)
   ) {
-    return {
+    base = {
       category: "er_opd",
       badgeLabel: "OPD / ตึกตรวจ",
+      accentColor: "#A61B29",
       badgeStyle: {
         text: "#1D4ED8",
         bg: "#DBEAFE",
@@ -146,9 +190,7 @@ export function classifyBuilding(node: MapNode): BuildingBadgeInfo {
       },
       subtitle: "อาคารตรวจผู้ป่วยนอกและลงทะเบียน",
     };
-  }
-
-  if (
+  } else if (
     text.includes("ตึกร่มเย็น") ||
     text.includes("10 ชั้น") ||
     text.includes("สูติ") ||
@@ -159,11 +201,13 @@ export function classifyBuilding(node: MapNode): BuildingBadgeInfo {
     text.includes("nicu") ||
     text.includes("picu")
   ) {
-    return {
+    base = {
       category: "maternal_child",
-      badgeLabel: text.includes("10 ชั้น") || text.includes("ร่มเย็น")
-        ? "ตึก 10 ชั้น"
-        : "เด็ก / สูติฯ",
+      badgeLabel:
+        text.includes("10 ชั้น") || text.includes("ร่มเย็น")
+          ? "ตึก 10 ชั้น"
+          : "เด็ก / สูติฯ",
+      accentColor: "#881337",
       badgeStyle: {
         text: "#047857",
         bg: "#CCFBF1",
@@ -173,9 +217,7 @@ export function classifyBuilding(node: MapNode): BuildingBadgeInfo {
         ? "ตึกร่มเย็น 10 ชั้น • เด็ก, สูติ-นรีเวช, ตา, หู คอ จมูก, พิเศษ"
         : "คลินิกกุมารเวชกรรมและสูติ-นรีเวช",
     };
-  }
-
-  if (
+  } else if (
     text.includes("เอ็กซ์เรย์") ||
     text.includes("เอกซเรย์") ||
     text.includes("รังสี") ||
@@ -188,9 +230,10 @@ export function classifyBuilding(node: MapNode): BuildingBadgeInfo {
     text.includes("lab") ||
     text.includes("ทันตกรรม")
   ) {
-    return {
+    base = {
       category: "diagnostic",
       badgeLabel: "ตรวจ / รังสี",
+      accentColor: "#1F8A70",
       badgeStyle: {
         text: "#1D4ED8",
         bg: "#DBEAFE",
@@ -198,9 +241,29 @@ export function classifyBuilding(node: MapNode): BuildingBadgeInfo {
       },
       subtitle: "หน่วยตรวจวินิจฉัย รังสีวิทยา และเวชกรรมฟื้นฟู",
     };
-  }
-
-  if (
+  } else if (
+    hasSupportCat &&
+    (text.includes("เภสัช") ||
+      text.includes("ร่มโพธิ์") ||
+      text.includes("พัสดุ") ||
+      text.includes("จ่ายกลาง") ||
+      text.includes("โภชนา") ||
+      text.includes("อำนวยการ") ||
+      text.includes("สนับสนุน") ||
+      text.includes("ประชุม"))
+  ) {
+    base = {
+      category: "support",
+      badgeLabel: "อาคารบริการ",
+      accentColor: "#6D4C41",
+      badgeStyle: {
+        text: "#475569",
+        bg: "#F1F5F9",
+        border: "#CBD5E1",
+      },
+      subtitle: "อาคารบริการ สนับสนุน และอำนวยการ โรงพยาบาลสกลนคร",
+    };
+  } else if (
     text.includes("8 ชั้น") ||
     text.includes("หัวใจ") ||
     text.includes("cicu") ||
@@ -211,9 +274,10 @@ export function classifyBuilding(node: MapNode): BuildingBadgeInfo {
     text.includes("ผ่าตัด") ||
     text.includes("เฉพาะทาง")
   ) {
-    return {
+    base = {
       category: "specialty",
       badgeLabel: text.includes("8 ชั้น") ? "ตึก 8 ชั้น" : "ศูนย์เฉพาะทาง",
+      accentColor: "#EAB308",
       badgeStyle: {
         text: "#047857",
         bg: "#CCFBF1",
@@ -221,24 +285,68 @@ export function classifyBuilding(node: MapNode): BuildingBadgeInfo {
       },
       subtitle: "อาคารหอผู้ป่วยในและศูนย์การแพทย์เฉพาะทาง",
     };
+  } else {
+    base = {
+      category: hasSupportCat ? "support" : "specialty",
+      badgeLabel: "อาคารบริการ",
+      accentColor: "#047857",
+      badgeStyle: {
+        text: "#047857",
+        bg: "#CCFBF1",
+        border: "#99F6E4",
+      },
+      subtitle: "อาคารและจุดให้บริการ โรงพยาบาลสกลนคร",
+    };
   }
 
-  return {
-    category: "specialty",
-    badgeLabel: "อาคารบริการ",
-    badgeStyle: {
-      text: "#047857",
-      bg: "#CCFBF1",
-      border: "#99F6E4",
-    },
-    subtitle: "อาคารและจุดให้บริการ โรงพยาบาลสกลนคร",
-  };
+  // Apply live Category metadata from GET /api/categories if available
+  if (categories && categories.length > 0) {
+    // Also check if an admin-defined custom category slug/name directly matches this building
+    const customMatch = categories.find(
+      (c) =>
+        ![
+          "er_opd",
+          "specialty",
+          "diagnostic",
+          "maternal_child",
+          "heart_center",
+          "support",
+        ].includes(c.slug) &&
+        (text.includes(c.name.toLowerCase()) ||
+          text.includes(c.slug.toLowerCase().replace(/_/g, " ")))
+    );
+
+    const matchedCat =
+      customMatch || categories.find((c) => c.slug === base.category);
+
+    if (matchedCat) {
+      return {
+        category: matchedCat.slug,
+        badgeLabel: matchedCat.name,
+        accentColor: matchedCat.color_hex || base.accentColor,
+        badgeStyle: {
+          text: getReadableTextHex(matchedCat.color_hex),
+          bg: matchedCat.badge_bg || base.badgeStyle.bg,
+          border: hexWithAlpha(matchedCat.color_hex, "4D"),
+        },
+        subtitle: base.subtitle,
+      };
+    }
+  }
+
+  return base;
 }
 
 /**
  * Splits keywords / indoor_guide into neat scannable department items for a 2-column card grid.
+ * Prefers structured `departments` attached from PostgreSQL when present.
  */
 export function extractDepartmentItems(node: MapNode): string[] {
+  if (node.departments && node.departments.length > 0) {
+    return node.departments.map((d) =>
+      d.floor ? `${d.name} (${d.floor})` : d.name
+    );
+  }
   const raw = (node.keywords || node.indoor_guide || "").trim();
   if (!raw) return [];
 

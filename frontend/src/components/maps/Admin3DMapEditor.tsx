@@ -7,9 +7,13 @@ import {
   Box,
   Eye,
   Globe,
+  Info,
+  Layers,
   Loader2,
   Map as MapIcon,
+  RefreshCw,
   RotateCcw,
+  X,
 } from "lucide-react";
 import type { MapEdge, MapNode, SurveyTrack } from "@/lib/api";
 import {
@@ -44,6 +48,10 @@ interface Admin3DMapEditorProps {
   onMapClick: (lat: number, lng: number) => void;
   onNodeClick: (node: MapNode) => void;
   onEdgeClick: (edge: MapEdge) => void;
+  splitTrackId?: number | null;
+  onSplitTrackClick?: (trackId: number, lat: number, lng: number) => void;
+  onRefresh?: () => void;
+  isRefreshing?: boolean;
 }
 
 const DEFAULT_3D_CENTER: [number, number] = [104.1581, 17.1633];
@@ -119,11 +127,17 @@ export default function Admin3DMapEditor({
   onMapClick,
   onNodeClick,
   onEdgeClick,
+  splitTrackId = null,
+  onSplitTrackClick,
+  onRefresh,
+  isRefreshing = false,
 }: Admin3DMapEditorProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const mapRef = useRef<maplibregl.Map | null>(null);
   const nodeMarkersRef = useRef<maplibregl.Marker[]>([]);
   const handleMarkersRef = useRef<maplibregl.Marker[]>([]);
+  const controlsPopoverRef = useRef<HTMLDivElement | null>(null);
+  const legendPopoverRef = useRef<HTMLDivElement | null>(null);
 
   const [dataset, setDataset] = useState<SakonHospital3DDataset | null>(
     cachedAdmin3DDataset
@@ -131,6 +145,38 @@ export default function Admin3DMapEditor({
   const [mapReady, setMapReady] = useState(false);
   const [isTilted3D, setIsTilted3D] = useState(true);
   const [translucentBuildings, setTranslucentBuildings] = useState(false);
+  const [controlsOpen, setControlsOpen] = useState(false);
+  const [legendOpen, setLegendOpen] = useState(false);
+
+  // Auto-resize MapLibre canvas whenever sidebar collapses/hides or container resizes
+  useEffect(() => {
+    const el = containerRef.current;
+    if (!el || typeof ResizeObserver === "undefined") return;
+    const ro = new ResizeObserver(() => {
+      mapRef.current?.resize();
+    });
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+
+  // Close floating popovers when clicking outside
+  useEffect(() => {
+    const handleOutside = (e: MouseEvent | TouchEvent) => {
+      const target = e.target as Node;
+      if (controlsPopoverRef.current && !controlsPopoverRef.current.contains(target)) {
+        setControlsOpen(false);
+      }
+      if (legendPopoverRef.current && !legendPopoverRef.current.contains(target)) {
+        setLegendOpen(false);
+      }
+    };
+    document.addEventListener("mousedown", handleOutside);
+    document.addEventListener("touchstart", handleOutside);
+    return () => {
+      document.removeEventListener("mousedown", handleOutside);
+      document.removeEventListener("touchstart", handleOutside);
+    };
+  }, []);
 
   const modeRef = useRef(mode);
   const onMapClickRef = useRef(onMapClick);
@@ -140,6 +186,8 @@ export default function Admin3DMapEditor({
   const onBeginTransform3DRef = useRef(onBeginTransform3D);
   const onLiveTransform3DRef = useRef(onLiveTransform3D);
   const onMapCenterChangeRef = useRef(onMapCenterChange);
+  const splitTrackIdRef = useRef<number | null>(splitTrackId ?? null);
+  const onSplitTrackClickRef = useRef(onSplitTrackClick);
   const selected3DRef = useRef<Building3DOverride | null>(selected3D ?? null);
   const edgesByIdRef = useRef<Map<number, MapEdge>>(new Map());
   const buildingPropsByIdRef = useRef<Map<string, Building3DProps>>(new Map());
@@ -175,6 +223,14 @@ export default function Admin3DMapEditor({
   useEffect(() => {
     onMapCenterChangeRef.current = onMapCenterChange;
   }, [onMapCenterChange]);
+
+  useEffect(() => {
+    splitTrackIdRef.current = splitTrackId ?? null;
+  }, [splitTrackId]);
+
+  useEffect(() => {
+    onSplitTrackClickRef.current = onSplitTrackClick;
+  }, [onSplitTrackClick]);
 
   useEffect(() => {
     selected3DRef.current = selected3D ?? null;
@@ -394,16 +450,21 @@ export default function Admin3DMapEditor({
               "line-dasharray": [2, 1.5],
             },
           },
-          // Survey tracks (Orange overlay)
+          // Survey tracks (Distinct per-track colors + thicker highlight when in Split mode)
           {
             id: "admin-surveys-line",
             type: "line",
             source: "adminSurveys",
             layout: { "line-cap": "round", "line-join": "round" },
             paint: {
-              "line-color": "#F97316",
-              "line-width": 5,
-              "line-opacity": 0.9,
+              "line-color": ["coalesce", ["get", "color"], "#F97316"],
+              "line-width": [
+                "case",
+                ["boolean", ["get", "is_splitting"], false],
+                8,
+                5,
+              ],
+              "line-opacity": 0.92,
             },
           },
           // Admin Edges: Active (solid sky-blue) & Inactive (red dashed)
@@ -615,6 +676,14 @@ export default function Admin3DMapEditor({
     }
 
     map.on("click", (e) => {
+      if (splitTrackIdRef.current !== null) {
+        onSplitTrackClickRef.current?.(
+          splitTrackIdRef.current,
+          e.lngLat.lat,
+          e.lngLat.lng
+        );
+        return;
+      }
       if (modeRef.current === "add_node") {
         onMapClickRef.current(e.lngLat.lat, e.lngLat.lng);
         return;
@@ -1093,7 +1162,12 @@ export default function Admin3DMapEditor({
       if (pts.length < 2) continue;
       features.push({
         type: "Feature",
-        properties: { id: track.id, name: track.name },
+        properties: {
+          id: track.id,
+          name: track.name,
+          color: track.color_hex || "#F97316",
+          is_splitting: splitTrackId === track.id,
+        },
         geometry: {
           type: "LineString",
           coordinates: pts.map(([lat, lng]) => [lng, lat]),
@@ -1101,7 +1175,7 @@ export default function Admin3DMapEditor({
       });
     }
     src.setData({ type: "FeatureCollection", features });
-  }, [surveys, showSurveys, mapReady]);
+  }, [surveys, showSurveys, splitTrackId, mapReady]);
 
   // Sync Interactive Admin Node Markers (clickable in all modes!)
   useEffect(() => {
@@ -1192,110 +1266,213 @@ export default function Admin3DMapEditor({
         </div>
       )}
 
-      {/* Top-Right Controls: 3-Mode Switcher + 3D Tilt + Translucent X-Ray + Reset */}
-      <div className="absolute top-3 right-3 z-[400] flex flex-col items-end gap-2">
-        <div
-          role="group"
-          aria-label="เลือกโหมดแผนที่ผู้ดูแล"
-          className="inline-flex items-center p-1 rounded-xl bg-white/95 backdrop-blur border border-slate-200 shadow-md"
-        >
+      {/* Top-Right Collapsible Layers Popover (collapsed by default for clean full-viewport canvas) */}
+      <div
+        ref={controlsPopoverRef}
+        className="absolute top-[70px] right-3 z-[400] flex flex-col items-end gap-2"
+      >
+        <div className="relative">
           <button
             type="button"
-            onClick={() => onChangeMapViewMode("3d")}
-            className={`min-h-[38px] px-3 rounded-lg text-xs font-bold flex items-center gap-1.5 transition-colors cursor-pointer ${
-              mapViewMode === "3d"
-                ? "bg-[#0F766E] text-white shadow-xs"
-                : "text-slate-600 hover:bg-slate-100"
-            }`}
-          >
-            <Box className="w-3.5 h-3.5" />
-            <span>แผนที่ 3D</span>
-          </button>
-          <button
-            type="button"
-            onClick={() => onChangeMapViewMode("satellite")}
-            className={`min-h-[38px] px-3 rounded-lg text-xs font-bold flex items-center gap-1.5 transition-colors cursor-pointer ${
-              mapViewMode === "satellite"
-                ? "bg-[#0F766E] text-white shadow-xs"
-                : "text-slate-600 hover:bg-slate-100"
-            }`}
-          >
-            <Globe className="w-3.5 h-3.5" />
-            <span>ดาวเทียม</span>
-          </button>
-          <button
-            type="button"
-            onClick={() => onChangeMapViewMode("street")}
-            className={`min-h-[38px] px-3 rounded-lg text-xs font-bold flex items-center gap-1.5 transition-colors cursor-pointer ${
-              mapViewMode === "street"
-                ? "bg-[#0F766E] text-white shadow-xs"
-                : "text-slate-600 hover:bg-slate-100"
-            }`}
-          >
-            <MapIcon className="w-3.5 h-3.5" />
-            <span>แผนที่ถนน</span>
-          </button>
-        </div>
-
-        <div className="flex items-center gap-1.5">
-          <button
-            type="button"
-            onClick={handleToggleTilt}
-            className="min-h-[40px] px-3 rounded-xl bg-white/95 backdrop-blur border border-slate-200 shadow-md hover:bg-slate-50 text-xs font-bold text-[#0F172A] flex items-center gap-1.5 cursor-pointer"
-          >
-            <Box className="w-4 h-4 text-[#0F766E]" />
-            <span>{isTilted3D ? "มุมบน 2D" : "เอียง 3D"}</span>
-          </button>
-
-          <button
-            type="button"
-            onClick={() => setTranslucentBuildings((prev) => !prev)}
-            title="ปรับความโปร่งแสงตึกเพื่อวางจุดและเชื่อมเส้นทางชั้นล่างได้สะดวก"
-            className={`min-h-[40px] px-3 rounded-xl border shadow-md text-xs font-bold flex items-center gap-1.5 transition-colors cursor-pointer ${
-              translucentBuildings
+            onClick={() => setControlsOpen((prev) => !prev)}
+            title="ชั้นข้อมูลและการแสดงผลแผนที่"
+            aria-label="ชั้นข้อมูลและการแสดงผลแผนที่"
+            aria-expanded={controlsOpen}
+            className={`w-10 h-10 rounded-xl border shadow-md flex items-center justify-center transition-colors cursor-pointer ${
+              controlsOpen || translucentBuildings || !isTilted3D
                 ? "bg-[#0F766E] border-[#0F766E] text-white"
-                : "bg-white/95 backdrop-blur border-slate-200 text-slate-700 hover:bg-teal-50"
+                : "bg-white/95 backdrop-blur border-slate-200 text-slate-700 hover:bg-slate-50"
             }`}
           >
-            <Eye className="w-4 h-4" />
-            <span>โปร่งแสงตึก</span>
+            <Layers className="w-4 h-4" />
           </button>
 
-          <button
-            type="button"
-            onClick={handleResetView}
-            title="รีเซ็ตมุมกล้อง"
-            className="min-h-[40px] min-w-[40px] rounded-xl bg-white/95 backdrop-blur border border-slate-200 shadow-md hover:bg-slate-50 text-slate-700 flex items-center justify-center cursor-pointer"
-          >
-            <RotateCcw className="w-4 h-4" />
-          </button>
+          {controlsOpen && (
+            <div className="absolute top-0 right-12 w-64 rounded-2xl bg-white/98 backdrop-blur border border-slate-200 shadow-xl p-3 space-y-3">
+              <div className="flex items-center justify-between">
+                <span className="text-xs font-bold text-[#0F172A]">
+                  ชั้นข้อมูลและการแสดงผล
+                </span>
+                <button
+                  type="button"
+                  onClick={() => setControlsOpen(false)}
+                  aria-label="ปิดแผงควบคุม"
+                  className="w-6 h-6 rounded-lg hover:bg-slate-100 text-slate-400 flex items-center justify-center cursor-pointer"
+                >
+                  <X className="w-3.5 h-3.5" />
+                </button>
+              </div>
+
+              {/* 3-Mode Map Switcher */}
+              <div className="grid grid-cols-3 gap-1 p-1 rounded-xl bg-slate-100">
+                <button
+                  type="button"
+                  onClick={() => {
+                    onChangeMapViewMode("3d");
+                    setControlsOpen(false);
+                  }}
+                  className={`min-h-[34px] rounded-lg text-[11px] font-bold flex items-center justify-center gap-1 transition-colors cursor-pointer ${
+                    mapViewMode === "3d"
+                      ? "bg-[#0F766E] text-white shadow-xs"
+                      : "text-slate-600 hover:bg-white"
+                  }`}
+                >
+                  <Box className="w-3.5 h-3.5" />
+                  <span>3D</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    onChangeMapViewMode("satellite");
+                    setControlsOpen(false);
+                  }}
+                  className={`min-h-[34px] rounded-lg text-[11px] font-bold flex items-center justify-center gap-1 transition-colors cursor-pointer ${
+                    mapViewMode === "satellite"
+                      ? "bg-[#0F766E] text-white shadow-xs"
+                      : "text-slate-600 hover:bg-white"
+                  }`}
+                >
+                  <Globe className="w-3.5 h-3.5" />
+                  <span>ดาวเทียม</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    onChangeMapViewMode("street");
+                    setControlsOpen(false);
+                  }}
+                  className={`min-h-[34px] rounded-lg text-[11px] font-bold flex items-center justify-center gap-1 transition-colors cursor-pointer ${
+                    mapViewMode === "street"
+                      ? "bg-[#0F766E] text-white shadow-xs"
+                      : "text-slate-600 hover:bg-white"
+                  }`}
+                >
+                  <MapIcon className="w-3.5 h-3.5" />
+                  <span>ถนน</span>
+                </button>
+              </div>
+
+              {/* 3D Tools & Refresh */}
+              <div className="grid grid-cols-2 gap-1.5">
+                <button
+                  type="button"
+                  onClick={handleToggleTilt}
+                  className={`min-h-[36px] px-2.5 rounded-xl border text-xs font-semibold flex items-center justify-center gap-1.5 transition-colors cursor-pointer ${
+                    !isTilted3D
+                      ? "bg-teal-50 border-teal-200 text-[#0F766E]"
+                      : "bg-white border-slate-200 text-slate-700 hover:bg-slate-50"
+                  }`}
+                >
+                  <Box className="w-3.5 h-3.5" />
+                  <span>{isTilted3D ? "มุมบน 2D" : "เอียง 3D"}</span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => setTranslucentBuildings((prev) => !prev)}
+                  className={`min-h-[36px] px-2.5 rounded-xl border text-xs font-semibold flex items-center justify-center gap-1.5 transition-colors cursor-pointer ${
+                    translucentBuildings
+                      ? "bg-[#0F766E] border-[#0F766E] text-white"
+                      : "bg-white border-slate-200 text-slate-700 hover:bg-slate-50"
+                  }`}
+                >
+                  <Eye className="w-3.5 h-3.5" />
+                  <span>โปร่งแสงตึก</span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => {
+                    handleResetView();
+                    setControlsOpen(false);
+                  }}
+                  className="min-h-[36px] px-2.5 rounded-xl border border-slate-200 bg-white hover:bg-slate-50 text-xs font-semibold text-slate-700 flex items-center justify-center gap-1.5 cursor-pointer"
+                >
+                  <RotateCcw className="w-3.5 h-3.5" />
+                  <span>รีเซ็ตมุมกล้อง</span>
+                </button>
+
+                {onRefresh && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      onRefresh();
+                      setControlsOpen(false);
+                    }}
+                    disabled={isRefreshing}
+                    className="min-h-[36px] px-2.5 rounded-xl border border-slate-200 bg-white hover:bg-slate-50 disabled:opacity-60 text-xs font-semibold text-slate-700 flex items-center justify-center gap-1.5 cursor-pointer"
+                  >
+                    <RefreshCw
+                      className={`w-3.5 h-3.5 ${isRefreshing ? "animate-spin" : ""}`}
+                    />
+                    <span>รีเฟรช</span>
+                  </button>
+                )}
+              </div>
+            </div>
+          )}
         </div>
       </div>
 
-      {/* Bottom Legend */}
-      <div className="absolute bottom-4 left-4 z-[400] rounded-xl bg-white/95 backdrop-blur border border-slate-200 shadow-md px-3.5 py-2 flex flex-wrap items-center gap-4 text-xs font-semibold text-slate-700">
-        <span className="flex items-center gap-1.5">
-          <span className="w-3 h-3 rounded-full bg-[#0F766E] inline-block" />
-          อาคาร (is_building)
-        </span>
-        <span className="flex items-center gap-1.5">
-          <span className="w-2.5 h-2.5 rounded-full bg-[#1D4ED8] inline-block" />
-          จุดแยกทางเดิน
-        </span>
-        <span className="flex items-center gap-1.5">
-          <span className="w-4 h-1 bg-[#0EA5E9] inline-block rounded" />
-          เส้นทางเปิด
-        </span>
-        <span className="flex items-center gap-1.5">
-          <span className="w-4 border-t-2 border-dashed border-[#DC2626] inline-block" />
-          เส้นทางปิดซ่อมแซม
-        </span>
-        {showSurveys && (
-          <span className="flex items-center gap-1.5">
-            <span className="w-4 h-1 bg-[#F97316] inline-block rounded" />
-            Survey Track
-          </span>
+      {/* Bottom-Left Collapsible Legend ("คำอธิบายสี") — collapsed by default */}
+      <div
+        ref={legendPopoverRef}
+        className="absolute bottom-4 left-3 z-[400]"
+      >
+        {legendOpen && (
+          <div className="mb-2 w-56 rounded-2xl bg-white/98 backdrop-blur border border-slate-200 shadow-lg p-3 space-y-2 text-xs font-semibold text-slate-700">
+            <div className="flex items-center justify-between pb-1 border-b border-slate-100">
+              <span className="text-[#0F172A] font-bold">คำอธิบายสีแผนที่</span>
+              <button
+                type="button"
+                onClick={() => setLegendOpen(false)}
+                aria-label="ปิดคำอธิบายสี"
+                className="w-6 h-6 rounded-lg hover:bg-slate-100 text-slate-400 flex items-center justify-center cursor-pointer"
+              >
+                <X className="w-3.5 h-3.5" />
+              </button>
+            </div>
+            <div className="grid grid-cols-1 gap-1.5">
+              <span className="flex items-center gap-2">
+                <span className="w-3 h-3 rounded-full bg-[#0F766E] inline-block shrink-0" />
+                อาคาร (is_building)
+              </span>
+              <span className="flex items-center gap-2">
+                <span className="w-2.5 h-2.5 rounded-full bg-[#1D4ED8] inline-block shrink-0" />
+                จุดแยกทางเดิน
+              </span>
+              <span className="flex items-center gap-2">
+                <span className="w-4 h-1 bg-[#0EA5E9] inline-block rounded shrink-0" />
+                เส้นทางเปิด
+              </span>
+              <span className="flex items-center gap-2">
+                <span className="w-4 border-t-2 border-dashed border-[#DC2626] inline-block shrink-0" />
+                เส้นทางปิดซ่อมแซม
+              </span>
+              {showSurveys && (
+                <span className="flex items-center gap-2">
+                  <span className="w-4 h-1 bg-[#F97316] inline-block rounded shrink-0" />
+                  Survey Track
+                </span>
+              )}
+            </div>
+          </div>
         )}
+
+        <button
+          type="button"
+          onClick={() => setLegendOpen((prev) => !prev)}
+          title="คำอธิบายสี"
+          aria-expanded={legendOpen}
+          className={`h-9 px-3 rounded-xl border shadow-md text-xs font-semibold inline-flex items-center gap-1.5 transition-colors cursor-pointer ${
+            legendOpen
+              ? "bg-[#0F766E] border-[#0F766E] text-white"
+              : "bg-white/95 backdrop-blur border-slate-200 text-slate-700 hover:bg-slate-50"
+          }`}
+        >
+          <Info className="w-3.5 h-3.5" />
+          <span>คำอธิบายสี</span>
+        </button>
       </div>
     </div>
   );

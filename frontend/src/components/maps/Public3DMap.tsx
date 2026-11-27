@@ -20,7 +20,7 @@ import {
   RotateCcw,
   X,
 } from "lucide-react";
-import type { MapNode, RouteResponse } from "@/lib/api";
+import type { Category, MapNode, RouteResponse } from "@/lib/api";
 import {
   buildDirectionalUserMarkerHTML,
   createGeoJsonCircle,
@@ -40,6 +40,8 @@ interface Public3DMapProps {
   mapViewMode: MapViewMode;
   onChangeMapViewMode: (mode: MapViewMode) => void;
   buildings: MapNode[];
+  categories?: Category[];
+  previewVersionId?: number | null;
   displayOriginCoords: [number, number];
   rawOriginCoords: [number, number];
   userHeadingDeg: number;
@@ -111,6 +113,8 @@ export default function Public3DMap({
   mapViewMode,
   onChangeMapViewMode,
   buildings,
+  categories = [],
+  previewVersionId = null,
   displayOriginCoords,
   rawOriginCoords,
   userHeadingDeg,
@@ -237,7 +241,11 @@ export default function Public3DMap({
         });
     }
 
-    fetch("/api/map-3d-overrides", { cache: "no-store" })
+    const overridesUrl = previewVersionId
+      ? `/api/map-3d-overrides?preview_version_id=${previewVersionId}`
+      : "/api/map-3d-overrides";
+
+    fetch(overridesUrl, { cache: "no-store" })
       .then((res) => (res.ok ? res.json() : null))
       .then((ov: Map3DOverridesPayload | null) => {
         if (!cancelled && ov) setOverrides3D(ov);
@@ -249,7 +257,7 @@ export default function Public3DMap({
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [previewVersionId]);
 
   // Apply Admin 3D model overrides, bind PostgreSQL map_nodes, and make buildings translucent when user walks inside
   const boundBuildings = useMemo(() => {
@@ -1732,23 +1740,42 @@ export default function Public3DMap({
                 </button>
               </div>
               <div className="grid grid-cols-1 gap-1.5">
-                <span className="flex items-center gap-2">
-                  <span className="w-3 h-3 rounded-xs bg-[#A61B29] inline-block shrink-0" />
-                  อาคารอุบัติเหตุฉุกเฉินฯ
-                </span>
-                <span className="flex items-center gap-2">
-                  <span className="w-3 h-3 rounded-xs bg-[#881337] inline-block shrink-0" />
-                  ตึกร่มเย็น
-                </span>
-                <span className="flex items-center gap-2">
-                  <span className="w-3 h-3 rounded-xs bg-[#EAB308] inline-block shrink-0" />
-                  ตึกร่มธรรม
-                </span>
-                <span className="flex items-center gap-2">
-                  <span className="w-3 h-3 rounded-xs bg-[#4A83B4] inline-block shrink-0" />
-                  อาคารหัวใจเพื่อแผ่นดิน
-                </span>
-                <span className="flex items-center gap-2">
+                {categories.filter((c) => c.show_in_legend).length > 0 ? (
+                  categories
+                    .filter((c) => c.show_in_legend)
+                    .map((cat) => (
+                      <span
+                        key={`legend-3d-${cat.id}`}
+                        className="flex items-center gap-2"
+                      >
+                        <span
+                          className="w-3 h-3 rounded-xs inline-block shrink-0 border border-black/10"
+                          style={{ backgroundColor: cat.color_hex }}
+                        />
+                        <span className="truncate">{cat.name}</span>
+                      </span>
+                    ))
+                ) : (
+                  <>
+                    <span className="flex items-center gap-2">
+                      <span className="w-3 h-3 rounded-xs bg-[#A61B29] inline-block shrink-0" />
+                      อาคารอุบัติเหตุฉุกเฉินฯ
+                    </span>
+                    <span className="flex items-center gap-2">
+                      <span className="w-3 h-3 rounded-xs bg-[#881337] inline-block shrink-0" />
+                      ตึกร่มเย็น
+                    </span>
+                    <span className="flex items-center gap-2">
+                      <span className="w-3 h-3 rounded-xs bg-[#EAB308] inline-block shrink-0" />
+                      ตึกร่มธรรม
+                    </span>
+                    <span className="flex items-center gap-2">
+                      <span className="w-3 h-3 rounded-xs bg-[#4A83B4] inline-block shrink-0" />
+                      อาคารหัวใจเพื่อแผ่นดิน
+                    </span>
+                  </>
+                )}
+                <span className="flex items-center gap-2 pt-1 border-t border-slate-100">
                   <span className="w-4 border-t-2 border-dashed border-[#FB923C] inline-block shrink-0" />
                   ทางเชื่อมมีหลังคา
                 </span>

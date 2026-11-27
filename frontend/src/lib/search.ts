@@ -150,6 +150,43 @@ export function rankBuildingsByQuery(
     let bestScore = scoreTermMatch(rawQuery, normQuery, building.name);
     let matchedHint: string | undefined;
 
+    // Check structured departments attached from /api/buildings
+    const depts = building.departments || [];
+    for (const dept of depts) {
+      const deptLabel = dept.floor ? `${dept.name} (${dept.floor})` : dept.name;
+      const deptNameScore = scoreTermMatch(rawQuery, normQuery, dept.name);
+      if (deptNameScore > bestScore) {
+        bestScore = deptNameScore;
+        matchedHint = deptLabel;
+      } else if (!matchedHint && deptNameScore >= 58) {
+        matchedHint = deptLabel;
+      }
+
+      const deptKeywords = (dept.keywords || "")
+        .split(/[,|\n;•]+/)
+        .map((k) => k.trim())
+        .filter(Boolean);
+      for (const dkw of deptKeywords) {
+        const s = scoreTermMatch(rawQuery, normQuery, dkw);
+        if (s > bestScore) {
+          bestScore = s;
+          matchedHint = deptLabel;
+        } else if (!matchedHint && s >= 60) {
+          matchedHint = deptLabel;
+        }
+      }
+
+      const deptCombined = scoreTermMatch(
+        rawQuery,
+        normQuery,
+        `${dept.name} ${dept.floor} ${dept.keywords}`
+      );
+      if (deptCombined > bestScore) {
+        bestScore = deptCombined;
+        matchedHint = deptLabel;
+      }
+    }
+
     // Check keywords / departments
     const keywords = (building.keywords || "")
       .split(/[,|\n;•]+/)
@@ -183,10 +220,13 @@ export function rankBuildingsByQuery(
     }
 
     // Also test combined text for multi-word queries spanning building name + department
+    const deptCombinedText = depts
+      .map((d) => `${d.name} ${d.floor} ${d.keywords}`)
+      .join(" ");
     const combinedScore = scoreTermMatch(
       rawQuery,
       normQuery,
-      `${building.name} ${building.keywords} ${building.indoor_guide}`
+      `${building.name} ${building.keywords} ${building.indoor_guide} ${deptCombinedText}`
     );
     if (combinedScore > bestScore) {
       bestScore = combinedScore;

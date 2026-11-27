@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import {
@@ -15,17 +15,40 @@ import {
 import {
   api,
   extractApiError,
-  setAdminToken,
+  type AdminMeResponse,
   type LoginResponse,
 } from "@/lib/api";
 
 export default function AdminLoginPage() {
   const router = useRouter();
+  const [checkingSession, setCheckingSession] = useState(true);
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [showPassword, setShowPassword] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+
+  // If already logged in via valid HttpOnly cookie, skip login screen cleanly
+  useEffect(() => {
+    let cancelled = false;
+    api
+      .get<AdminMeResponse>("/api/admin/me")
+      .then((res) => {
+        if (!cancelled && res.data?.admin) {
+          router.replace("/admin");
+        } else if (!cancelled) {
+          setCheckingSession(false);
+        }
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setCheckingSession(false);
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [router]);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -42,11 +65,10 @@ export default function AdminLoginPage() {
         username: username.trim(),
         password,
       });
-      if (res.data?.token) {
-        setAdminToken(res.data.token);
-        router.replace("/admin/map");
+      if (res.data?.admin) {
+        router.replace("/admin");
       } else {
-        setErrorMessage("ไม่ได้รับโทเคนยืนยันตัวตนจากระบบ");
+        setErrorMessage("ไม่สามารถยืนยันตัวตนได้ กรุณาลองใหม่อีกครั้ง");
       }
     } catch (err) {
       setErrorMessage(
@@ -56,6 +78,14 @@ export default function AdminLoginPage() {
       setIsSubmitting(false);
     }
   };
+
+  if (checkingSession) {
+    return (
+      <div className="min-h-dvh bg-[#F8FAFC] flex items-center justify-center">
+        <Loader2 className="w-7 h-7 animate-spin text-[#0F766E]" />
+      </div>
+    );
+  }
 
   return (
     <div className="min-h-dvh bg-[#F8FAFC] flex flex-col justify-between p-4 sm:p-6">

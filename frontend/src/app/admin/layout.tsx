@@ -2,22 +2,25 @@
 
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
+  Box,
   Building2,
   Compass,
   ExternalLink,
+  History,
   LayoutDashboard,
   Loader2,
   LogOut,
-  Map as MapIcon,
+  Megaphone,
   Menu,
   PanelLeftClose,
   PanelLeftOpen,
-  SlidersHorizontal,
   X,
 } from "lucide-react";
-import { clearAdminToken, getAdminToken } from "@/lib/api";
+import { api, type AdminMeResponse } from "@/lib/api";
+
+const IDLE_TIMEOUT_MS = 30 * 60 * 1000; // 30 minutes
 
 interface AdminNavItem {
   href: string;
@@ -36,22 +39,28 @@ const ADMIN_NAV_ITEMS: AdminNavItem[] = [
     exact: true,
   },
   {
-    href: "/admin/map",
-    label: "แผนที่ & โมเดล 3D",
-    shortLabel: "แผนที่ 3D",
-    icon: MapIcon,
-  },
-  {
     href: "/admin/directory",
-    label: "อาคาร แผนก และจุดบริการ",
-    shortLabel: "อาคาร/แผนก",
+    label: "แก้ไขข้อมูลตึก",
+    shortLabel: "แก้ไขข้อมูลตึก",
     icon: Building2,
   },
   {
+    href: "/admin/map",
+    label: "แก้ไขแผนที่ 3D",
+    shortLabel: "แก้ไขแผนที่ 3D",
+    icon: Box,
+  },
+  {
+    href: "/admin/history",
+    label: "ประวัติการแก้ไข",
+    shortLabel: "ประวัติการแก้ไข",
+    icon: History,
+  },
+  {
     href: "/admin/settings",
-    label: "หมวดหมู่ ประกาศ & QR Code",
-    shortLabel: "ตั้งค่า/QR",
-    icon: SlidersHorizontal,
+    label: "ประกาศ & QR Code",
+    shortLabel: "ประกาศ/QR",
+    icon: Megaphone,
   },
   {
     href: "/admin/survey",
@@ -59,6 +68,12 @@ const ADMIN_NAV_ITEMS: AdminNavItem[] = [
     shortLabel: "GPS Survey",
     icon: Compass,
   },
+];
+
+const MOBILE_BOTTOM_TABS: AdminNavItem[] = [
+  ADMIN_NAV_ITEMS[1], // แก้ไขข้อมูลตึก
+  ADMIN_NAV_ITEMS[2], // แก้ไขแผนที่ 3D
+  ADMIN_NAV_ITEMS[3], // ประวัติการแก้ไข
 ];
 
 export default function AdminLayout({
@@ -75,18 +90,99 @@ export default function AdminLayout({
   const [sidebarHidden, setSidebarHidden] = useState(false);
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
 
+  const lastActivityRef = useRef<number>(Date.now());
+  const isSurveyRecordingRef = useRef<boolean>(false);
+
+  const handleLogout = useCallback(async () => {
+    try {
+      await api.post("/api/admin/logout");
+    } catch {
+      // Proceed to login screen even if network fails
+    }
+    router.replace("/admin/login");
+  }, [router]);
+
+  // Verify HttpOnly session cookie via GET /api/admin/me whenever entering /admin zone
   useEffect(() => {
     if (isLoginPage) {
       setAuthChecked(true);
       return;
     }
-    const token = getAdminToken();
-    if (!token) {
-      router.replace("/admin/login");
-      return;
-    }
-    setAuthChecked(true);
-  }, [isLoginPage, router]);
+    let cancelled = false;
+    api
+      .get<AdminMeResponse>("/api/admin/me")
+      .then((res) => {
+        if (!cancelled) {
+          if (res.data?.admin) {
+            setAuthChecked(true);
+          } else {
+            router.replace("/admin/login");
+          }
+        }
+      })
+      .catch(() => {
+        if (!cancelled) {
+          router.replace("/admin/login");
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [isLoginPage, pathname, router]);
+
+  // Track active GPS recording state from /admin/survey so Idle Timeout never interrupts field recording
+  useEffect(() => {
+    const onRecordingState = (ev: Event) => {
+      const custom = ev as CustomEvent<{ recording?: boolean }>;
+      isSurveyRecordingRef.current = Boolean(custom.detail?.recording);
+      if (isSurveyRecordingRef.current) {
+        lastActivityRef.current = Date.now();
+      }
+    };
+    window.addEventListener("admin-survey-recording-state", onRecordingState);
+    return () => {
+      window.removeEventListener(
+        "admin-survey-recording-state",
+        onRecordingState
+      );
+    };
+  }, []);
+
+  // 30-Minute Idle Timeout (paused while actively recording GPS on /admin/survey)
+  useEffect(() => {
+    if (isLoginPage || !authChecked) return;
+
+    lastActivityRef.current = Date.now();
+    const markActivity = () => {
+      lastActivityRef.current = Date.now();
+    };
+
+    const events: (keyof WindowEventMap)[] = [
+      "mousemove",
+      "mousedown",
+      "keydown",
+      "touchstart",
+      "scroll",
+    ];
+    events.forEach((evt) =>
+      window.addEventListener(evt, markActivity, { passive: true })
+    );
+
+    const interval = setInterval(() => {
+      if (isSurveyRecordingRef.current) {
+        lastActivityRef.current = Date.now();
+        return;
+      }
+      if (Date.now() - lastActivityRef.current >= IDLE_TIMEOUT_MS) {
+        handleLogout();
+      }
+    }, 30000);
+
+    return () => {
+      events.forEach((evt) => window.removeEventListener(evt, markActivity));
+      clearInterval(interval);
+    };
+  }, [isLoginPage, authChecked, handleLogout]);
 
   useEffect(() => {
     setMobileMenuOpen(false);
@@ -136,11 +232,6 @@ export default function AdminLayout({
       </div>
     );
   }
-
-  const handleLogout = () => {
-    clearAdminToken();
-    router.replace("/admin/login");
-  };
 
   const isActiveRoute = (item: AdminNavItem) => {
     if (item.exact) return pathname === item.href;
@@ -238,16 +329,18 @@ export default function AdminLayout({
         {renderSidebarLinks(sidebarCollapsed)}
 
         <div className="shrink-0 p-2.5 border-t border-slate-200 space-y-1.5">
-          <Link
+          <a
             href="/"
-            title={sidebarCollapsed ? "เปิดหน้าผู้ใช้ทั่วไป" : undefined}
+            target="_blank"
+            rel="noopener noreferrer"
+            title={sidebarCollapsed ? "เปิดหน้าผู้ใช้ทั่วไป (แท็บใหม่)" : undefined}
             className={`min-h-[40px] px-3 rounded-xl border border-slate-200 bg-slate-50 hover:bg-teal-50 hover:border-teal-200 text-xs font-semibold text-slate-700 flex items-center gap-2.5 transition-colors ${
               sidebarCollapsed ? "justify-center px-0" : ""
             }`}
           >
             <ExternalLink className="w-4 h-4 text-[#0F766E] shrink-0" />
             {!sidebarCollapsed && <span>เปิดหน้าแผนที่ผู้ใช้</span>}
-          </Link>
+          </a>
 
           <button
             type="button"
@@ -287,13 +380,15 @@ export default function AdminLayout({
           </span>
         </div>
 
-        <Link
+        <a
           href="/"
+          target="_blank"
+          rel="noopener noreferrer"
           className="min-h-[36px] px-2.5 rounded-lg border border-slate-200 bg-slate-50 text-xs font-semibold text-slate-700 inline-flex items-center gap-1.5 shrink-0"
         >
           <ExternalLink className="w-3.5 h-3.5 text-[#0F766E]" />
           <span>หน้าผู้ใช้</span>
-        </Link>
+        </a>
       </header>
       )}
 
@@ -328,13 +423,15 @@ export default function AdminLayout({
             </div>
             {renderSidebarLinks(false)}
             <div className="p-3 border-t border-slate-200 space-y-2">
-              <Link
+              <a
                 href="/"
+                target="_blank"
+                rel="noopener noreferrer"
                 className="min-h-[42px] px-3 rounded-xl border border-slate-200 bg-slate-50 text-xs font-semibold text-slate-700 flex items-center gap-2"
               >
                 <ExternalLink className="w-4 h-4 text-[#0F766E]" />
                 <span>เปิดหน้าแผนที่ผู้ใช้</span>
-              </Link>
+              </a>
               <button
                 type="button"
                 onClick={handleLogout}
@@ -352,6 +449,33 @@ export default function AdminLayout({
       <div className="flex-1 min-w-0 min-h-0 flex flex-col overflow-hidden">
         {children}
       </div>
+
+      {/* Mobile Bottom Navigation Bar (matches Admin 3-tab mockup) */}
+      {!sidebarHidden && (
+        <nav
+          aria-label="แถบเมนูล่างผู้ดูแลระบบ"
+          className="md:hidden shrink-0 bg-white border-t border-slate-200 px-2 py-1.5 grid grid-cols-3 gap-1.5 shadow-[0_-2px_10px_rgba(15,23,42,0.06)] z-[600]"
+        >
+          {MOBILE_BOTTOM_TABS.map((item) => {
+            const Icon = item.icon;
+            const active = isActiveRoute(item);
+            return (
+              <Link
+                key={item.href}
+                href={item.href}
+                className={`min-h-[50px] rounded-xl flex flex-col items-center justify-center gap-0.5 text-[11px] font-bold transition-colors ${
+                  active
+                    ? "bg-[#CCFBF1] text-[#0F766E]"
+                    : "text-slate-600 hover:bg-slate-50"
+                }`}
+              >
+                <Icon className="w-5 h-5" />
+                <span className="truncate">{item.shortLabel}</span>
+              </Link>
+            );
+          })}
+        </nav>
+      )}
     </div>
   );
 }

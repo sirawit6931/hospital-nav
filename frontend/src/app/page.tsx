@@ -7,13 +7,28 @@ import {
   ChevronDown,
   ChevronUp,
   Headphones,
+  LayoutDashboard,
   Loader2,
+  LogOut,
   Map as MapIcon,
   Navigation,
+  QrCode,
   Search,
   ShieldAlert,
+  ShieldCheck,
+  X,
 } from "lucide-react";
-import { api, extractApiError, type MapNode, type RouteResponse } from "@/lib/api";
+import Link from "next/link";
+import {
+  api,
+  extractApiError,
+  type AdminMeResponse,
+  type Announcement,
+  type Category,
+  type MapNode,
+  type RouteResponse,
+  type ServicePoint,
+} from "@/lib/api";
 import {
   FILTER_CHIPS,
   HOSPITAL_CENTER,
@@ -24,6 +39,7 @@ import {
   interpolateAlongPolyline,
   snapToPolyline,
   type FilterCategoryId,
+  type FilterChipOption,
 } from "@/lib/hospital";
 import type { MapViewMode } from "@/lib/hospital3d";
 import {
@@ -34,6 +50,7 @@ import {
 } from "@/lib/navigation";
 import { rankBuildingsByQuery } from "@/lib/search";
 import HospitalHeader from "@/components/HospitalHeader";
+import AnnouncementBanner from "@/components/AnnouncementBanner";
 import BuildingSearchBar from "@/components/BuildingSearchBar";
 import BuildingCard from "@/components/BuildingCard";
 import RoutePanel from "@/components/RoutePanel";
@@ -73,7 +90,7 @@ const ARRIVAL_THRESHOLD_METERS = 15;
 const REROUTE_COOLDOWN_MS = 5000;
 
 export default function HomePage() {
-  const [activeTab, setActiveTab] = useState<NavTab>("buildings");
+  const [activeTab, setActiveTab] = useState<NavTab>("route");
   const [mapViewMode, setMapViewMode] = useState<MapViewMode>("3d");
   const [isDesktopViewport, setIsDesktopViewport] = useState<boolean>(true);
   const [searchInput, setSearchInput] = useState("");
@@ -84,6 +101,22 @@ export default function HomePage() {
   const [allBuildings, setAllBuildings] = useState<MapNode[]>([]);
   const [isLoadingBuildings, setIsLoadingBuildings] = useState(true);
   const [buildingsError, setBuildingsError] = useState<string | null>(null);
+
+  // Live API-driven public metadata (categories, service points, announcements, QR start_node)
+  const [categories, setCategories] = useState<Category[]>([]);
+  const [servicePoints, setServicePoints] = useState<ServicePoint[]>([]);
+  const [isLoadingServices, setIsLoadingServices] = useState(true);
+  const [servicesError, setServicesError] = useState<string | null>(null);
+  const [announcements, setAnnouncements] = useState<Announcement[]>([]);
+  const [qrOriginNode, setQrOriginNode] = useState<MapNode | null>(null);
+  const [qrBannerDismissed, setQrBannerDismissed] = useState(false);
+  const [previewVersionId, setPreviewVersionId] = useState<number | null>(null);
+  const [activeAdminUser, setActiveAdminUser] = useState<{
+    id: number;
+    username: string;
+  } | null>(null);
+  const hasQrStartNodeRef = useRef<boolean>(false);
+  const previewVersionIdRef = useRef<number | null>(null);
 
   const [gpsStatus, setGpsStatus] = useState<
     "idle" | "locating" | "ready" | "fallback"
@@ -137,10 +170,15 @@ export default function HomePage() {
   // Mobile Bottom Sheet expansion state when viewing route map
   const [sheetExpanded, setSheetExpanded] = useState(true);
 
-  const originBuilding = useMemo(
-    () => allBuildings.find((b) => b.id === originBuildingId) ?? null,
-    [allBuildings, originBuildingId]
-  );
+  const originBuilding = useMemo(() => {
+    if (originBuildingId === null) return null;
+    const fromBuildings = allBuildings.find((b) => b.id === originBuildingId);
+    if (fromBuildings) return fromBuildings;
+    if (qrOriginNode && qrOriginNode.id === originBuildingId) {
+      return qrOriginNode;
+    }
+    return null;
+  }, [allBuildings, originBuildingId, qrOriginNode]);
 
   // Raw current origin coordinates before snapping to the active route polyline
   const rawOriginCoords: [number, number] = useMemo(() => {
@@ -214,8 +252,13 @@ export default function HomePage() {
     setIsLoadingBuildings(true);
     setBuildingsError(null);
     try {
+      const params: Record<string, string | number> = {};
+      if (queryText) params.q = queryText;
+      if (previewVersionIdRef.current) {
+        params.preview_version_id = previewVersionIdRef.current;
+      }
       const res = await api.get<MapNode[]>("/api/buildings", {
-        params: queryText ? { q: queryText } : undefined,
+        params: Object.keys(params).length > 0 ? params : undefined,
       });
       const list = Array.isArray(res.data) ? res.data : [];
       setBuildings(list);
@@ -228,6 +271,33 @@ export default function HomePage() {
       );
     } finally {
       setIsLoadingBuildings(false);
+    }
+  }, []);
+
+  const fetchPublicMetadata = useCallback(async () => {
+    setIsLoadingServices(true);
+    setServicesError(null);
+    const [catResult, spResult, annResult] = await Promise.allSettled([
+      api.get<Category[]>("/api/categories"),
+      api.get<ServicePoint[]>("/api/service-points"),
+      api.get<Announcement[]>("/api/announcements"),
+    ]);
+
+    if (catResult.status === "fulfilled" && Array.isArray(catResult.value.data)) {
+      setCategories(catResult.value.data);
+    }
+
+    if (spResult.status === "fulfilled" && Array.isArray(spResult.value.data)) {
+      setServicePoints(spResult.value.data);
+    } else if (spResult.status === "rejected") {
+      setServicesError(
+        extractApiError(spResult.reason, "ไม่สามารถโหลดข้อมูลจุดบริการได้ในขณะนี้")
+      );
+    }
+    setIsLoadingServices(false);
+
+    if (annResult.status === "fulfilled" && Array.isArray(annResult.value.data)) {
+      setAnnouncements(annResult.value.data);
     }
   }, []);
 
@@ -339,8 +409,10 @@ export default function HomePage() {
       }
       setMockGpsEnabled(false);
       setIsMockWalking(false);
-      setOriginMode("gps");
-      setOriginBuildingId(null);
+      if (fromUserGesture || !hasQrStartNodeRef.current) {
+        setOriginMode("gps");
+        setOriginBuildingId(null);
+      }
       if (!hasInitialGpsFixRef.current) {
         setGpsStatus("locating");
       }
@@ -383,9 +455,62 @@ export default function HomePage() {
   }, [requestCompassPermission]);
 
   useEffect(() => {
+    // Check QR Code deep-link (?start_node=ID) & Admin Draft Preview (?preview_version_id=ID)
+    let qrNodeId: number | null = null;
+    if (typeof window !== "undefined") {
+      const params = new URLSearchParams(window.location.search);
+      const previewParam = params.get("preview_version_id");
+      if (previewParam) {
+        const parsedPreview = Number(previewParam);
+        if (Number.isInteger(parsedPreview) && parsedPreview > 0) {
+          previewVersionIdRef.current = parsedPreview;
+          setPreviewVersionId(parsedPreview);
+        }
+      }
+      const startParam = params.get("start_node");
+      if (startParam) {
+        const parsed = Number(startParam);
+        if (Number.isInteger(parsed) && parsed > 0) {
+          qrNodeId = parsed;
+          hasQrStartNodeRef.current = true;
+        }
+      }
+    }
+
     fetchBuildings("");
+    fetchPublicMetadata();
     acquireGpsLocation(false);
-  }, [fetchBuildings, acquireGpsLocation]);
+
+    // Silent check if an admin session cookie is currently active (never redirects or errors on 401)
+    api
+      .get<AdminMeResponse>("/api/admin/me")
+      .then((res) => {
+        if (res.data?.admin) {
+          setActiveAdminUser(res.data.admin);
+        }
+      })
+      .catch(() => {
+        setActiveAdminUser(null);
+      });
+
+    if (qrNodeId !== null) {
+      api
+        .get<MapNode>(`/api/nodes/${qrNodeId}`)
+        .then((res) => {
+          const node = res.data;
+          if (node && node.id) {
+            setQrOriginNode(node);
+            setQrBannerDismissed(false);
+            setOriginMode("building");
+            setOriginBuildingId(node.id);
+            setFocusedNode(node);
+          }
+        })
+        .catch(() => {
+          hasQrStartNodeRef.current = false;
+        });
+    }
+  }, [fetchBuildings, fetchPublicMetadata, acquireGpsLocation]);
 
   // Track desktop vs mobile breakpoint so only one WebGL/Leaflet map mounts at a time
   useEffect(() => {
@@ -526,7 +651,7 @@ export default function HomePage() {
     async (
       origin: [number, number],
       target: MapNode,
-      options?: { isAutoReroute?: boolean }
+      options?: { isAutoReroute?: boolean; startNodeId?: number | null }
     ) => {
       if (isFetchingRouteRef.current) return;
       isFetchingRouteRef.current = true;
@@ -539,13 +664,18 @@ export default function HomePage() {
       setRouteError(null);
 
       try {
-        const res = await api.get<RouteResponse>("/api/route", {
-          params: {
-            lat: origin[0],
-            lng: origin[1],
-            target_node_id: target.id,
-          },
-        });
+        const params: Record<string, number> = {
+          lat: origin[0],
+          lng: origin[1],
+          target_node_id: target.id,
+        };
+        if (options?.startNodeId && options.startNodeId > 0) {
+          params.start_node_id = options.startNodeId;
+        }
+        if (previewVersionIdRef.current) {
+          params.preview_version_id = previewVersionIdRef.current;
+        }
+        const res = await api.get<RouteResponse>("/api/route", { params });
         setRouteData(res.data);
       } catch (err) {
         if (!options?.isAutoReroute) {
@@ -570,7 +700,9 @@ export default function HomePage() {
   useEffect(() => {
     if (!targetBuilding) return;
     lastRerouteAtRef.current = Date.now();
-    fetchRoute(rawOriginCoords, targetBuilding);
+    fetchRoute(rawOriginCoords, targetBuilding, {
+      startNodeId: originMode === "building" ? originBuildingId : null,
+    });
     // Intentionally triggered only when user selects a new target or switches origin mode/building
     // Live GPS movement uses Snap-to-Path & Auto-Reroute below to avoid spamming /api/route
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -863,6 +995,26 @@ export default function HomePage() {
     setSheetExpanded(true);
   }, []);
 
+  const handleNavigateToServiceNode = useCallback(
+    async (nodeId: number) => {
+      const source = allBuildings.length > 0 ? allBuildings : buildings;
+      const existing = source.find((b) => b.id === nodeId);
+      if (existing) {
+        handleSelectRoute(existing);
+        return;
+      }
+      try {
+        const res = await api.get<MapNode>(`/api/nodes/${nodeId}`);
+        if (res.data && res.data.id) {
+          handleSelectRoute(res.data);
+        }
+      } catch {
+        // Ignore if node no longer exists
+      }
+    },
+    [allBuildings, buildings, handleSelectRoute]
+  );
+
   const handleSearchSubmit = (query: string) => {
     const trimmed = query.trim();
     setAppliedQuery(trimmed);
@@ -978,7 +1130,20 @@ export default function HomePage() {
     setUserGpsCoords(routeData.path[0]);
   };
 
-  // Live ranked building list: filters instantly as user types (including fuzzy/near matches)
+  // Dynamic filter chips built from GET /api/categories (with graceful fallback)
+  const filterChips = useMemo<FilterChipOption[]>(() => {
+    if (categories.length === 0) return FILTER_CHIPS;
+    return [
+      { id: "all", label: "ทั้งหมด" },
+      ...categories.map((cat) => ({
+        id: cat.slug,
+        label: cat.name,
+        colorHex: cat.color_hex,
+      })),
+    ];
+  }, [categories]);
+
+  // Live ranked building list: filters instantly as user types (including fuzzy/near matches & departments)
   const filteredBuildings = useMemo(() => {
     const sourceList = allBuildings.length > 0 ? allBuildings : buildings;
     const liveQuery = searchInput.trim();
@@ -989,7 +1154,7 @@ export default function HomePage() {
       );
       if (activeFilter === "all") return ranked;
       const inCategory = ranked.filter(
-        (b) => classifyBuilding(b).category === activeFilter
+        (b) => classifyBuilding(b, categories).category === activeFilter
       );
       // If user typed a department outside current chip, show the ranked matches cleanly
       return inCategory.length > 0 ? inCategory : ranked;
@@ -997,17 +1162,59 @@ export default function HomePage() {
 
     if (activeFilter === "all") return sourceList;
     return sourceList.filter(
-      (b) => classifyBuilding(b).category === activeFilter
+      (b) => classifyBuilding(b, categories).category === activeFilter
     );
-  }, [allBuildings, buildings, searchInput, activeFilter]);
+  }, [allBuildings, buildings, searchInput, activeFilter, categories]);
+
+  const qrOriginNotice =
+    qrOriginNode &&
+    originMode === "building" &&
+    originBuildingId === qrOriginNode.id &&
+    !qrBannerDismissed ? (
+      <div className="mb-3 rounded-2xl bg-teal-50 border border-teal-200 px-3.5 py-2.5 flex items-center justify-between gap-2.5">
+        <div className="flex items-start gap-2.5 min-w-0">
+          <div className="w-8 h-8 rounded-lg bg-[#0F766E] text-white flex items-center justify-center shrink-0">
+            <QrCode className="w-4 h-4" />
+          </div>
+          <div className="min-w-0">
+            <p className="text-xs font-bold text-[#0F766E]">
+              ตั้งจุดเริ่มต้นจาก QR Code แล้ว
+            </p>
+            <p className="text-xs text-slate-700 truncate">
+              {qrOriginNode.name || `จุดพิกัด #${qrOriginNode.id}`} • เลือกอาคารปลายทางได้เลย
+            </p>
+          </div>
+        </div>
+        <div className="flex items-center gap-1 shrink-0">
+          <button
+            type="button"
+            onClick={() => handleChangeOriginMode("gps")}
+            className="min-h-[34px] px-2.5 rounded-lg bg-white border border-teal-200 text-[11px] font-bold text-[#0F766E] hover:bg-teal-100/60 cursor-pointer"
+          >
+            ใช้ GPS
+          </button>
+          <button
+            type="button"
+            onClick={() => setQrBannerDismissed(true)}
+            aria-label="ปิดแถบแจ้งจุดเริ่มต้น QR"
+            className="w-7 h-7 rounded-lg hover:bg-teal-100 text-teal-700 flex items-center justify-center cursor-pointer"
+          >
+            <X className="w-3.5 h-3.5" />
+          </button>
+        </div>
+      </div>
+    ) : null;
 
   // Building Search Content (Figma Frame 1)
   const searchContent = (
     <div className="space-y-4">
+      {qrOriginNotice}
+
       {/* Live Autocomplete & Fuzzy Search Bar */}
       <BuildingSearchBar
         value={searchInput}
         allBuildings={allBuildings.length > 0 ? allBuildings : buildings}
+        categories={categories}
         onChange={(nextVal) => {
           setSearchInput(nextVal);
           if (!nextVal.trim() && appliedQuery) {
@@ -1021,9 +1228,9 @@ export default function HomePage() {
         onRouteSuggestion={handleSelectRoute}
       />
 
-      {/* Horizontal Filter Chips */}
+      {/* Horizontal Filter Chips (driven by GET /api/categories) */}
       <div className="flex items-center gap-2 overflow-x-auto no-scrollbar pb-0.5">
-        {FILTER_CHIPS.map((chip) => {
+        {filterChips.map((chip) => {
           const isActive = activeFilter === chip.id;
           const totalCount =
             allBuildings.length > 0 ? allBuildings.length : buildings.length;
@@ -1034,14 +1241,24 @@ export default function HomePage() {
               key={chip.id}
               type="button"
               onClick={() => setActiveFilter(chip.id)}
-              className={`min-h-[44px] px-4 rounded-full text-sm font-semibold whitespace-nowrap border transition-colors cursor-pointer ${
+              className={`min-h-[44px] px-4 rounded-full text-sm font-semibold whitespace-nowrap border transition-colors inline-flex items-center gap-2 cursor-pointer ${
                 isActive
                   ? "bg-[#0F766E] border-[#0F766E] text-white shadow-sm"
                   : "bg-white border-slate-200 text-slate-700 hover:border-teal-300 hover:text-[#0F766E]"
               }`}
             >
-              {chip.label}
-              {countSuffix}
+              {chip.colorHex && (
+                <span
+                  className="w-2.5 h-2.5 rounded-full shrink-0 border border-black/15"
+                  style={{
+                    backgroundColor: isActive ? "#FFFFFF" : chip.colorHex,
+                  }}
+                />
+              )}
+              <span>
+                {chip.label}
+                {countSuffix}
+              </span>
             </button>
           );
         })}
@@ -1111,6 +1328,7 @@ export default function HomePage() {
             <BuildingCard
               key={building.id}
               building={building}
+              categories={categories}
               originCoords={displayOriginCoords}
               isSelected={targetBuilding?.id === building.id}
               onSelectRoute={handleSelectRoute}
@@ -1148,9 +1366,11 @@ export default function HomePage() {
 
   const routePanelProps = {
     buildings: allBuildings.length > 0 ? allBuildings : buildings,
+    categories,
     originLabel: effectiveOriginLabel,
     originMode,
     originBuildingId,
+    qrOriginNode,
     targetBuilding,
     routeData,
     isLoadingRoute,
@@ -1162,7 +1382,9 @@ export default function HomePage() {
     onRetryRoute: () => {
       if (targetBuilding) {
         lastRerouteAtRef.current = Date.now();
-        fetchRoute(rawOriginCoords, targetBuilding);
+        fetchRoute(rawOriginCoords, targetBuilding, {
+          startNodeId: originMode === "building" ? originBuildingId : null,
+        });
       }
     },
     onStartNavigation: handleStartNavigation,
@@ -1173,6 +1395,8 @@ export default function HomePage() {
     mapViewMode,
     onChangeMapViewMode: setMapViewMode,
     buildings: allBuildings.length > 0 ? allBuildings : buildings,
+    categories,
+    previewVersionId,
     displayOriginCoords,
     rawOriginCoords,
     userHeadingDeg,
@@ -1217,11 +1441,63 @@ export default function HomePage() {
       <PublicNavigationMap {...sharedMapProps} />
     );
 
+  const handlePublicAdminLogout = useCallback(async () => {
+    try {
+      await api.post("/api/admin/logout");
+    } catch {
+      // Ignore
+    }
+    setActiveAdminUser(null);
+  }, []);
+
+  const adminSessionBar = activeAdminUser ? (
+    <div className="shrink-0 bg-slate-900 text-white px-3 py-1.5 flex items-center justify-between gap-2 text-xs">
+      <div className="flex items-center gap-1.5 min-w-0">
+        <ShieldCheck className="w-3.5 h-3.5 text-teal-400 shrink-0" />
+        <span className="truncate font-semibold">
+          แอดมิน: {activeAdminUser.username}
+        </span>
+      </div>
+      <div className="flex items-center gap-1.5 shrink-0">
+        <Link
+          href="/admin"
+          className="px-2 py-0.5 rounded-md bg-teal-600 hover:bg-teal-500 text-white text-[11px] font-bold inline-flex items-center gap-1 transition-colors"
+        >
+          <LayoutDashboard className="w-3 h-3" />
+          <span>กลับหน้า Admin</span>
+        </Link>
+        <button
+          type="button"
+          onClick={handlePublicAdminLogout}
+          className="px-2 py-0.5 rounded-md bg-rose-600/90 hover:bg-rose-600 text-white text-[11px] font-bold inline-flex items-center gap-1 transition-colors cursor-pointer"
+        >
+          <LogOut className="w-3 h-3" />
+          <span>ออกจากระบบ</span>
+        </button>
+      </div>
+    </div>
+  ) : null;
+
   return (
     <div className="h-dvh w-full overflow-hidden flex flex-col md:flex-row bg-[#F8FAFC]">
       {/* ================= DESKTOP / TABLET LEFT SIDEBAR (420px) ================= */}
       <aside className="hidden md:flex md:w-[420px] md:shrink-0 h-full flex-col border-r border-slate-200 bg-[#F8FAFC]">
+        {adminSessionBar}
+        {previewVersionId && (
+          <div className="shrink-0 bg-amber-500 text-white px-3.5 py-2 flex items-center justify-between gap-2 text-xs font-bold">
+            <span className="truncate">
+              โหมดตัวอย่างแผนที่ฉบับร่าง (เวอร์ชัน #{previewVersionId})
+            </span>
+            <a
+              href="/"
+              className="shrink-0 px-2.5 py-1 rounded-lg bg-white/20 hover:bg-white/30 text-white text-[11px]"
+            >
+              กลับหน้าจริง
+            </a>
+          </div>
+        )}
         <HospitalHeader gpsStatus={gpsStatus} onLocateMe={handleLocateMeClick} />
+        <AnnouncementBanner announcements={announcements} />
 
         {/* Desktop Tab Bar */}
         <nav
@@ -1243,10 +1519,10 @@ export default function HomePage() {
           <button
             type="button"
             onClick={() => setActiveTab("route")}
-            className={`min-h-[44px] rounded-xl text-sm font-bold flex items-center justify-center gap-1.5 transition-colors cursor-pointer ${
+            className={`min-h-[46px] rounded-full text-sm font-bold flex items-center justify-center gap-1.5 transition-all cursor-pointer ${
               activeTab === "route"
-                ? "bg-[#CCFBF1] text-[#0F766E]"
-                : "text-slate-600 hover:bg-slate-100"
+                ? "bg-[#0F766E] text-white shadow-[0_4px_12px_rgba(15,118,110,0.3)] -translate-y-0.5"
+                : "bg-white border border-slate-200 text-slate-700 shadow-xs hover:border-teal-300 hover:text-[#0F766E]"
             }`}
           >
             <MapIcon className="w-4 h-4" />
@@ -1275,7 +1551,16 @@ export default function HomePage() {
               <RoutePanel {...routePanelProps} />
             </>
           )}
-          {activeTab === "services" && <ServiceDirectory />}
+          {activeTab === "services" && (
+            <ServiceDirectory
+              servicePoints={servicePoints}
+              buildings={allBuildings.length > 0 ? allBuildings : buildings}
+              isLoading={isLoadingServices}
+              error={servicesError}
+              onRetry={fetchPublicMetadata}
+              onNavigateToNode={handleNavigateToServiceNode}
+            />
+          )}
         </div>
       </aside>
 
@@ -1286,9 +1571,26 @@ export default function HomePage() {
 
       {/* ================= MOBILE FULL-EXPERIENCE WEB APP (< 768px) ================= */}
       <div className="flex md:hidden flex-col h-dvh w-full overflow-hidden">
-        {/* Hide header during Active Navigation on Mobile for full-screen Google Maps experience */}
+        {/* Hide header & announcements during Active Navigation on Mobile for full-screen Google Maps experience */}
         {!isNavigating && (
-          <HospitalHeader gpsStatus={gpsStatus} onLocateMe={handleLocateMeClick} />
+          <>
+            {adminSessionBar}
+            {previewVersionId && (
+              <div className="shrink-0 bg-amber-500 text-white px-3 py-1.5 flex items-center justify-between gap-2 text-xs font-bold">
+                <span className="truncate">
+                  ตัวอย่างแผนที่ฉบับร่าง (#{previewVersionId})
+                </span>
+                <a
+                  href="/"
+                  className="shrink-0 px-2 py-0.5 rounded bg-white/20 hover:bg-white/30 text-white text-[11px]"
+                >
+                  หน้าจริง
+                </a>
+              </div>
+            )}
+            <HospitalHeader gpsStatus={gpsStatus} onLocateMe={handleLocateMeClick} />
+            <AnnouncementBanner announcements={announcements} compact />
+          </>
         )}
 
         {/* Mobile Main Stage */}
@@ -1299,7 +1601,14 @@ export default function HomePage() {
 
           {!isNavigating && activeTab === "services" && (
             <div className="h-full overflow-y-auto p-4">
-              <ServiceDirectory />
+              <ServiceDirectory
+                servicePoints={servicePoints}
+                buildings={allBuildings.length > 0 ? allBuildings : buildings}
+                isLoading={isLoadingServices}
+                error={servicesError}
+                onRetry={fetchPublicMetadata}
+                onNavigateToNode={handleNavigateToServiceNode}
+              />
             </div>
           )}
 
@@ -1387,12 +1696,12 @@ export default function HomePage() {
         {!isNavigating && (
           <nav
             aria-label="แถบเมนูล่าง"
-            className="shrink-0 bg-white border-t border-slate-200 px-2 py-1.5 grid grid-cols-3 gap-1.5 shadow-[0_-2px_10px_rgba(15,23,42,0.05)]"
+            className="relative z-[520] shrink-0 overflow-visible bg-white border-t border-slate-200 px-2.5 py-1.5 grid grid-cols-3 items-end gap-2 shadow-[0_-2px_10px_rgba(15,23,42,0.06)]"
           >
             <button
               type="button"
               onClick={() => setActiveTab("buildings")}
-              className={`min-h-[52px] rounded-xl flex flex-col items-center justify-center gap-0.5 text-xs font-bold transition-colors cursor-pointer ${
+              className={`min-h-[50px] rounded-xl flex flex-col items-center justify-center gap-0.5 text-xs font-bold transition-colors cursor-pointer ${
                 activeTab === "buildings"
                   ? "bg-[#CCFBF1] text-[#0F766E]"
                   : "text-slate-600 hover:bg-slate-50"
@@ -1402,23 +1711,25 @@ export default function HomePage() {
               <span>ค้นหาตึก</span>
             </button>
 
-            <button
-              type="button"
-              onClick={() => setActiveTab("route")}
-              className={`min-h-[52px] rounded-xl flex flex-col items-center justify-center gap-0.5 text-xs font-bold transition-colors cursor-pointer ${
-                activeTab === "route"
-                  ? "bg-[#CCFBF1] text-[#0F766E]"
-                  : "text-slate-600 hover:bg-slate-50"
-              }`}
-            >
-              <MapIcon className="w-5 h-5" />
-              <span>เส้นทาง</span>
-            </button>
+            <div className="flex justify-center">
+              <button
+                type="button"
+                onClick={() => setActiveTab("route")}
+                className={`relative -mt-3.5 w-full max-w-[116px] min-h-[58px] rounded-full px-3 py-1.5 flex flex-col items-center justify-center gap-0.5 text-xs font-bold border-2 transition-all cursor-pointer ${
+                  activeTab === "route"
+                    ? "bg-[#0F766E] text-white border-white shadow-[0_6px_16px_rgba(15,118,110,0.36)] ring-1 ring-teal-700/15"
+                    : "bg-white text-slate-700 border-slate-100 shadow-[0_4px_12px_rgba(15,23,42,0.12)] hover:text-[#0F766E] hover:border-teal-100"
+                }`}
+              >
+                <MapIcon className="w-5 h-5" />
+                <span>เส้นทาง</span>
+              </button>
+            </div>
 
             <button
               type="button"
               onClick={() => setActiveTab("services")}
-              className={`min-h-[52px] rounded-xl flex flex-col items-center justify-center gap-0.5 text-xs font-bold transition-colors cursor-pointer ${
+              className={`min-h-[50px] rounded-xl flex flex-col items-center justify-center gap-0.5 text-xs font-bold transition-colors cursor-pointer ${
                 activeTab === "services"
                   ? "bg-[#CCFBF1] text-[#0F766E]"
                   : "text-slate-600 hover:bg-slate-50"
@@ -1435,6 +1746,7 @@ export default function HomePage() {
       {showArrivalModal && targetBuilding && (
         <ArrivalModal
           building={routeData?.target_building ?? targetBuilding}
+          categories={categories}
           distanceMeters={distanceToTargetMeters ?? 0}
           onClose={() => {
             dismissedArrivalKeyRef.current = `${targetBuilding.id}`;

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"strings"
 	"time"
 
 	"golang.org/x/crypto/bcrypt"
@@ -493,5 +494,428 @@ func InsertInitialHospitalSeed(db *gorm.DB) error {
 	}
 
 	log.Printf("Seeded initial Sakon Nakhon Hospital map data (%d nodes, %d edges)", len(initialNodes), len(initialEdges))
+	return nil
+}
+
+// MigrateAndSeedAdminTables safely adds new columns to map_edges, AutoMigrates the new
+// non-PostGIS tables (categories, departments, service_points, announcements) without touching
+// existing PostGIS tables, and seeds initial data when each table is empty.
+func MigrateAndSeedAdminTables() error {
+	if DB == nil {
+		return errors.New("database connection is not initialized")
+	}
+
+	// 1. Non-destructive column additions on map_nodes, map_edges, and survey_tracks
+	alterStatements := []string{
+		`ALTER TABLE map_nodes ADD COLUMN IF NOT EXISTS version_id INTEGER`,
+		`ALTER TABLE map_nodes ADD COLUMN IF NOT EXISTS building_code VARCHAR(50) NOT NULL DEFAULT ''`,
+		`ALTER TABLE map_nodes ADD COLUMN IF NOT EXISTS badge_label VARCHAR(50) NOT NULL DEFAULT ''`,
+		`ALTER TABLE map_nodes ADD COLUMN IF NOT EXISTS floor_range VARCHAR(50) NOT NULL DEFAULT ''`,
+		`ALTER TABLE map_nodes ADD COLUMN IF NOT EXISTS service_status VARCHAR(40) NOT NULL DEFAULT 'open'`,
+		`ALTER TABLE map_nodes ADD COLUMN IF NOT EXISTS category_id INTEGER`,
+		`ALTER TABLE map_nodes ADD COLUMN IF NOT EXISTS image_urls JSONB NOT NULL DEFAULT '[]'::jsonb`,
+		`UPDATE map_nodes SET image_urls = jsonb_build_array(image_url) WHERE COALESCE(TRIM(image_url), '') <> '' AND (image_urls IS NULL OR image_urls = '[]'::jsonb)`,
+		`ALTER TABLE map_edges ADD COLUMN IF NOT EXISTS version_id INTEGER`,
+		`ALTER TABLE map_edges ADD COLUMN IF NOT EXISTS is_covered BOOLEAN DEFAULT FALSE`,
+		`ALTER TABLE map_edges ADD COLUMN IF NOT EXISTS is_indoor_passthrough BOOLEAN DEFAULT FALSE`,
+		`ALTER TABLE map_edges ADD COLUMN IF NOT EXISTS closure_reason TEXT DEFAULT ''`,
+		`ALTER TABLE survey_tracks ADD COLUMN IF NOT EXISTS zone VARCHAR(120) DEFAULT ''`,
+		`ALTER TABLE survey_tracks ADD COLUMN IF NOT EXISTS status VARCHAR(30) NOT NULL DEFAULT 'in_progress'`,
+		`ALTER TABLE survey_tracks ADD COLUMN IF NOT EXISTS color_hex VARCHAR(20) DEFAULT ''`,
+		`CREATE INDEX IF NOT EXISTS idx_map_nodes_version_id ON map_nodes (version_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_map_nodes_category_id ON map_nodes (category_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_map_edges_version_id ON map_edges (version_id)`,
+	}
+	for _, stmt := range alterStatements {
+		if err := DB.Exec(stmt).Error; err != nil {
+			return fmt.Errorf("failed to alter map tables: %w", err)
+		}
+	}
+
+	// 2. GORM AutoMigrate for new relational tables (never AutoMigrate PostGIS map_nodes/map_edges)
+	if err := DB.AutoMigrate(
+		&models.AdminSession{},
+		&models.MapVersion{},
+		&models.Category{},
+		&models.Department{},
+		&models.ServicePoint{},
+		&models.Announcement{},
+		&models.AuditLog{},
+	); err != nil {
+		return fmt.Errorf("failed to auto-migrate admin tables: %w", err)
+	}
+
+	// 2.5 Seed default Live Map Version (v1) and bind all existing unversioned nodes/edges to it
+	var versionCount int64
+	if err := DB.Model(&models.MapVersion{}).Count(&versionCount).Error; err == nil && versionCount == 0 {
+		defaultVersion := models.MapVersion{
+			Name:        "เวอร์ชันใช้งานจริง (v1)",
+			Description: "เวอร์ชันแผนที่เริ่มต้นของโรงพยาบาลสกลนคร (จุด, เส้นเชื่อม และโมเดล 3D ตั้งต้น)",
+			IsLive:      true,
+		}
+		if err := DB.Create(&defaultVersion).Error; err != nil {
+			return fmt.Errorf("failed to create default map version: %w", err)
+		}
+		log.Printf("Created default live map version #%d (%s)", defaultVersion.ID, defaultVersion.Name)
+	}
+
+	// Ensure at least one version is marked is_live = true
+	var liveVersion models.MapVersion
+	if err := DB.Where("is_live = ?", true).Order("id ASC").First(&liveVersion).Error; err != nil {
+		if err2 := DB.Order("id ASC").First(&liveVersion).Error; err2 == nil && liveVersion.ID > 0 {
+			_ = DB.Model(&models.MapVersion{}).Where("id = ?", liveVersion.ID).Update("is_live", true).Error
+			liveVersion.IsLive = true
+		}
+	}
+	if liveVersion.ID > 0 {
+		if err := DB.Exec(`UPDATE map_nodes SET version_id = ? WHERE version_id IS NULL OR version_id = 0`, liveVersion.ID).Error; err != nil {
+			return fmt.Errorf("failed to backfill map_nodes.version_id: %w", err)
+		}
+		if err := DB.Exec(`UPDATE map_edges SET version_id = ? WHERE version_id IS NULL OR version_id = 0`, liveVersion.ID).Error; err != nil {
+			return fmt.Errorf("failed to backfill map_edges.version_id: %w", err)
+		}
+		// Copy legacy 3D overrides JSON into versioned file for v1 if present
+		legacy3D := "uploads/custom_3d_overrides.json"
+		versioned3D := fmt.Sprintf("uploads/custom_3d_overrides_v%d.json", liveVersion.ID)
+		if _, err := os.Stat(versioned3D); os.IsNotExist(err) {
+			if raw, readErr := os.ReadFile(legacy3D); readErr == nil && len(raw) > 0 {
+				_ = os.MkdirAll("uploads", 0o755)
+				_ = os.WriteFile(versioned3D, raw, 0o644)
+			}
+		}
+	}
+
+	// 3. Seed Categories if empty
+	var catCount int64
+	if err := DB.Model(&models.Category{}).Count(&catCount).Error; err == nil && catCount == 0 {
+		defaultCategories := []models.Category{
+			{Name: "ฉุกเฉิน / OPD", Slug: "er_opd", ColorHex: "#A61B29", BadgeBg: "#FFE4E6", SortOrder: 1, ShowInLegend: true},
+			{Name: "ตึก 8 ชั้น / เฉพาะทาง", Slug: "specialty", ColorHex: "#EAB308", BadgeBg: "#FEF9C3", SortOrder: 2, ShowInLegend: true},
+			{Name: "ตรวจ / รังสี / กายภาพ", Slug: "diagnostic", ColorHex: "#1F8A70", BadgeBg: "#DBEAFE", SortOrder: 3, ShowInLegend: true},
+			{Name: "เด็ก / สูติฯ (ตึกร่มเย็น)", Slug: "maternal_child", ColorHex: "#881337", BadgeBg: "#FCE7F3", SortOrder: 4, ShowInLegend: true},
+			{Name: "ศูนย์หัวใจเพื่อแผ่นดิน", Slug: "heart_center", ColorHex: "#4A83B4", BadgeBg: "#DBEAFE", SortOrder: 5, ShowInLegend: true},
+			{Name: "อาคารบริการและสนับสนุน", Slug: "support", ColorHex: "#6D4C41", BadgeBg: "#F1F5F9", SortOrder: 6, ShowInLegend: false},
+		}
+		if err := DB.Create(&defaultCategories).Error; err != nil {
+			log.Printf("Warning: failed to seed categories: %v", err)
+		} else {
+			log.Printf("Seeded %d default categories", len(defaultCategories))
+		}
+	}
+
+	// Helper to find an existing building node ID by substring match
+	findBuildingID := func(keyword string) *uint {
+		var node models.MapNode
+		if err := DB.Where("is_building = true AND name ILIKE ?", "%"+keyword+"%").Order("id ASC").First(&node).Error; err == nil && node.ID > 0 {
+			id := node.ID
+			return &id
+		}
+		return nil
+	}
+
+	// 4. Seed Departments if empty (aligned with existing public building guides)
+	var deptCount int64
+	if err := DB.Model(&models.Department{}).Count(&deptCount).Error; err == nil && deptCount == 0 {
+		type deptSeed struct {
+			MatchBuilding  string
+			Name           string
+			Floor          string
+			OperatingHours string
+			Phone          string
+			Keywords       string
+		}
+		seeds := []deptSeed{
+			{"อุบัติเหตุฉุกเฉิน", "ห้องอุบัติเหตุฉุกเฉิน (ER)", "ชั้น 1", "ตลอด 24 ชั่วโมง", "1669 / 042-176-000", "ER, ฉุกเฉิน, อุบัติเหตุ, คัดกรอง"},
+			{"อุบัติเหตุฉุกเฉิน", "ห้องตรวจผู้ป่วยนอกทั่วไป (OPD)", "ชั้น 1", "จ.-ศ. 08:30 - 16:30 น.", "042-176-000", "OPD, ผู้ป่วยนอก, ยื่นบัตร, ประกันสังคม"},
+			{"อุบัติเหตุฉุกเฉิน", "คลินิกโรคผิวหนัง", "ชั้น 2", "จ.-ศ. 08:30 - 16:30 น.", "042-176-000", "ผิวหนัง, Dermatology"},
+			{"อุบัติเหตุฉุกเฉิน", "คลินิกสูติ-นรีเวชกรรม", "ชั้น 3", "จ.-ศ. 08:30 - 16:30 น.", "042-176-000", "สูติ, นรีเวช, ฝากครรภ์"},
+			{"อุบัติเหตุฉุกเฉิน", "คลินิกตา และ หู คอ จมูก (ENT)", "ชั้น 4", "จ.-ศ. 08:30 - 16:30 น.", "042-176-000", "ตา, จักษุ, หู คอ จมูก, ENT"},
+			{"ร่มเย็น", "หอผู้ป่วยวิกฤตทารกแรกเกิด (NICU 1, 2)", "ชั้น 1", "ตลอด 24 ชั่วโมง", "042-176-000", "NICU, ทารกแรกเกิด"},
+			{"ร่มเย็น", "หอผู้ป่วยวิกฤตเด็ก (PICU)", "ชั้น 2", "ตลอด 24 ชั่วโมง", "042-176-000", "PICU, เด็กวิกฤต"},
+			{"ร่มเย็น", "หอผู้ป่วยกุมารเวชกรรม 2 และ 3", "ชั้น 4-5", "ตลอด 24 ชั่วโมง", "042-176-000", "กุมารเวชกรรม, หอผู้ป่วยเด็ก"},
+			{"ร่มเย็น", "หอผู้ป่วยพิเศษ (Special Ward)", "ชั้น 10", "ตลอด 24 ชั่วโมง", "042-176-000", "ห้องพิเศษ, Special Ward"},
+			{"ร่มธรรม", "ห้องยาผู้ป่วยใน", "ชั้น G", "ตลอด 24 ชั่วโมง", "042-176-000", "ห้องยา, จ่ายยาผู้ป่วยใน"},
+			{"ร่มธรรม", "หอผู้ป่วยอายุรกรรม / MICU / Stroke", "ชั้น 1-4", "ตลอด 24 ชั่วโมง", "042-176-000", "MICU, Stroke, อายุรกรรม, IPD"},
+			{"ร่มธรรม", "หอผู้ป่วยศัลยกรรม และ Trauma", "ชั้น 5-7", "ตลอด 24 ชั่วโมง", "042-176-000", "ศัลยกรรม, Trauma"},
+			{"หัวใจเพื่อแผ่นดิน", "จุดชำระเงิน (การเงิน) และจุดรับยาผู้ป่วยนอก", "ชั้น 1", "จ.-ศ. 08:00 - 16:30 น.", "042-176-000", "การเงิน, ชำระเงิน, รับยา ชั้น 1"},
+			{"หัวใจเพื่อแผ่นดิน", "ศูนย์โรคหัวใจ คลินิกนอกเวลา (SMC) และฟอกไต", "ชั้น 2-3", "จ.-ศ. 08:30 - 20:00 น.", "042-176-000", "หัวใจ, SMC, คลินิกนอกเวลา, ฟอกไต"},
+			{"หัวใจเพื่อแผ่นดิน", "ห้องผ่าตัดหัวใจ (OR) และ CICU", "ชั้น 4", "ตลอด 24 ชั่วโมง", "042-176-000", "CICU, ผ่าตัดหัวใจ, OR"},
+			{"รังสีรักษา", "ศูนย์ตรวจ MRI และ CT Scan", "ชั้น 1", "จ.-ศ. 08:30 - 16:30 น.", "042-176-000", "MRI, CT Scan, เอกซเรย์คอมพิวเตอร์"},
+			{"รังสีรักษา", "หน่วยรังสีรักษาและเวชศาสตร์นิวเคลียร์", "ชั้น 2-4", "จ.-ศ. 08:30 - 16:30 น.", "042-176-000", "รังสีรักษา, ฉายแสง"},
+			{"ศัลยกรรม คลอดผ่าตัด", "ห้องผ่าตัดกลาง (OR) และห้องคลอด", "ชั้น 1-3", "ตลอด 24 ชั่วโมง", "042-176-000", "ผ่าตัด, ห้องคลอด, OR"},
+			{"วิเคราะห์ วิจัย บำบัด", "ห้องปฏิบัติการตรวจวิเคราะห์และเจาะเลือด (Lab)", "ชั้น 1-2", "จ.-ศ. 07:00 - 16:30 น.", "042-176-000", "เจาะเลือด, แล็บ, Lab, ตรวจเลือด"},
+			{"ล้างไตทางช่องท้อง", "หน่วยล้างไตทางช่องท้อง (CAPD) และเอ็กซ์เรย์", "ชั้น 1-2", "จ.-ศ. 08:30 - 16:30 น.", "042-176-000", "CAPD, ล้างไต, X-Ray"},
+			{"กายภาพบำบัด", "คลินิกกายภาพบำบัดและแพทย์แผนไทย", "ชั้น 1-2", "จ.-ศ. 08:30 - 16:30 น.", "042-176-000", "กายภาพบำบัด, แพทย์แผนไทย, เวชศาสตร์ฟื้นฟู"},
+		}
+		toInsert := make([]models.Department, 0, len(seeds))
+		for _, s := range seeds {
+			if nodeID := findBuildingID(s.MatchBuilding); nodeID != nil {
+				toInsert = append(toInsert, models.Department{
+					NodeID:         *nodeID,
+					Name:           s.Name,
+					Floor:          s.Floor,
+					OperatingHours: s.OperatingHours,
+					Phone:          s.Phone,
+					Keywords:       s.Keywords,
+				})
+			}
+		}
+		if len(toInsert) > 0 {
+			if err := DB.Create(&toInsert).Error; err != nil {
+				log.Printf("Warning: failed to seed departments: %v", err)
+			} else {
+				log.Printf("Seeded %d default departments", len(toInsert))
+			}
+		}
+	}
+
+	// 5. Seed Service Points if empty (matches existing ServiceDirectory.tsx data)
+	var spCount int64
+	if err := DB.Model(&models.ServicePoint{}).Count(&spCount).Error; err == nil && spCount == 0 {
+		erNodeID := findBuildingID("อุบัติเหตุฉุกเฉิน")
+		defaultServices := []models.ServicePoint{
+			{
+				NodeID:      erNodeID,
+				Type:        "emergency",
+				Name:        "สายด่วนเจ็บป่วยฉุกเฉิน 1669",
+				Description: "ให้บริการตลอด 24 ชั่วโมง สำหรับผู้ป่วยฉุกเฉินวิกฤตและอุบัติเหตุ",
+				Phone:       "1669",
+				IsActive:    true,
+			},
+			{
+				NodeID:      erNodeID,
+				Type:        "info",
+				Name:        "ประชาสัมพันธ์ รพ.สกลนคร",
+				Description: "สอบถามข้อมูลอาคาร แผนกบริการ สิทธิการรักษา และเยี่ยมผู้ป่วย",
+				Phone:       "042-176-000",
+				IsActive:    true,
+			},
+			{
+				NodeID:      erNodeID,
+				Type:        "opd",
+				Name:        "ห้องตรวจผู้ป่วยนอก (OPD)",
+				Description: "วันจันทร์ – ศุกร์ เวลา 08:30 – 16:30 น. (ยื่นบัตรตั้งแต่ 06:30 น.)",
+				Phone:       "042-176-000",
+				IsActive:    true,
+			},
+			{
+				NodeID:      erNodeID,
+				Type:        "wheelchair",
+				Name:        "จุดบริการรถเข็นและผู้สูงอายุ",
+				Description: "สามารถติดต่อขอรับบริการรถเข็นได้ที่จุดคัดกรองหน้าอาคารผู้ป่วยนอกและตึกอุบัติเหตุฉุกเฉิน",
+				Phone:       "042-176-000",
+				IsActive:    true,
+			},
+		}
+		if err := DB.Create(&defaultServices).Error; err != nil {
+			log.Printf("Warning: failed to seed service points: %v", err)
+		} else {
+			log.Printf("Seeded %d default service points", len(defaultServices))
+		}
+	}
+
+	// 6. Seed Default Announcement if empty
+	var annCount int64
+	if err := DB.Model(&models.Announcement{}).Count(&annCount).Error; err == nil && annCount == 0 {
+		defaultAnnouncements := []models.Announcement{
+			{
+				Title:    "ยินดีต้อนรับสู่ระบบนำทางโรงพยาบาลสกลนคร",
+				Message:  "ผู้รับบริการสามารถค้นหาชื่อตึกหรือชื่อแผนกเพื่อนำทางเดินเท้าแบบ 3D และใช้ทางเชื่อมมีหลังคาได้ตลอดเส้นทาง",
+				Level:    "info",
+				IsActive: true,
+			},
+		}
+		if err := DB.Create(&defaultAnnouncements).Error; err != nil {
+			log.Printf("Warning: failed to seed announcements: %v", err)
+		} else {
+			log.Printf("Seeded %d default announcements", len(defaultAnnouncements))
+		}
+	}
+
+	// 7. Non-destructive backfill for existing buildings (building_code, badge_label, floor_range, service_status, category_id)
+	if err := backfillBuildingMetadata(); err != nil {
+		log.Printf("Warning: failed to backfill building metadata: %v", err)
+	}
+
+	return nil
+}
+
+// backfillBuildingMetadata populates default building_code, badge_label, floor_range, service_status,
+// and category_id for existing building rows without overwriting any values already set by admins.
+func backfillBuildingMetadata() error {
+	var cats []models.Category
+	if err := DB.Order("sort_order ASC, id ASC").Find(&cats).Error; err != nil {
+		return err
+	}
+	catIDBySlug := make(map[string]uint, len(cats))
+	for _, c := range cats {
+		catIDBySlug[strings.ToLower(strings.TrimSpace(c.Slug))] = c.ID
+	}
+
+	var buildings []models.MapNode
+	if err := DB.Where("is_building = true").Order("id ASC").Find(&buildings).Error; err != nil {
+		return err
+	}
+
+	updatedCount := 0
+	for _, b := range buildings {
+		nameLower := strings.ToLower(b.Name)
+		allText := strings.ToLower(b.Name + " " + b.Keywords + " " + b.IndoorGuide)
+
+		nextCode := strings.TrimSpace(b.BuildingCode)
+		nextBadge := strings.TrimSpace(b.BadgeLabel)
+		nextFloors := strings.TrimSpace(b.FloorRange)
+		nextStatus := strings.TrimSpace(b.ServiceStatus)
+		nextCatID := b.CategoryID
+
+		if nextStatus == "" {
+			if strings.Contains(nameLower, "ฉุกเฉิน") || strings.Contains(nameLower, "อุบัติเหตุ") || strings.Contains(nameLower, "er") {
+				nextStatus = "open_24h"
+			} else {
+				nextStatus = "open"
+			}
+		}
+
+		// Match category slug, default badge, code, and floor range
+		var matchedSlug string
+		switch {
+		case strings.Contains(nameLower, "10 ชั้น") || strings.Contains(nameLower, "ร่มเย็น"):
+			matchedSlug = "maternal_child"
+			if nextCode == "" {
+				nextCode = "BLD-10"
+			}
+			if nextBadge == "" {
+				nextBadge = "10 ชั้น"
+			}
+			if nextFloors == "" {
+				nextFloors = "1 - 10"
+			}
+		case strings.Contains(nameLower, "8 ชั้น") || strings.Contains(nameLower, "ร่มธรรม"):
+			matchedSlug = "specialty"
+			if nextCode == "" {
+				nextCode = "BLD-08"
+			}
+			if nextBadge == "" {
+				nextBadge = "8 ชั้น"
+			}
+			if nextFloors == "" {
+				nextFloors = "G - 7"
+			}
+		case strings.Contains(nameLower, "หัวใจเพื่อแผ่นดิน"):
+			if _, ok := catIDBySlug["heart_center"]; ok {
+				matchedSlug = "heart_center"
+			} else {
+				matchedSlug = "specialty"
+			}
+			if nextCode == "" {
+				nextCode = "BLD-HRT"
+			}
+			if nextBadge == "" {
+				nextBadge = "CICU"
+			}
+			if nextFloors == "" {
+				nextFloors = "1 - 4"
+			}
+		case strings.Contains(nameLower, "ฉุกเฉิน") || strings.Contains(nameLower, "อุบัติเหตุ"):
+			matchedSlug = "er_opd"
+			if nextCode == "" {
+				nextCode = "BLD-ER"
+			}
+			if nextBadge == "" {
+				nextBadge = "ER / OPD"
+			}
+			if nextFloors == "" {
+				nextFloors = "1 - 9"
+			}
+		case strings.Contains(nameLower, "รังสีรักษา") || strings.Contains(nameLower, "mri"):
+			matchedSlug = "diagnostic"
+			if nextCode == "" {
+				nextCode = "BLD-MRI"
+			}
+			if nextBadge == "" {
+				nextBadge = "MRI"
+			}
+			if nextFloors == "" {
+				nextFloors = "1 - 4"
+			}
+		case strings.Contains(nameLower, "วิเคราะห์"):
+			matchedSlug = "diagnostic"
+			if nextCode == "" {
+				nextCode = "BLD-LAB"
+			}
+			if nextBadge == "" {
+				nextBadge = "LAB"
+			}
+			if nextFloors == "" {
+				nextFloors = "1 - 2"
+			}
+		case strings.Contains(nameLower, "ล้างไต") || strings.Contains(nameLower, "เอ็กซ์เรย์"):
+			matchedSlug = "diagnostic"
+			if nextBadge == "" {
+				nextBadge = "X-Ray"
+			}
+			if nextFloors == "" {
+				nextFloors = "1 - 2"
+			}
+		case strings.Contains(nameLower, "กายภาพ"):
+			matchedSlug = "diagnostic"
+			if nextBadge == "" {
+				nextBadge = "กายภาพ"
+			}
+			if nextFloors == "" {
+				nextFloors = "1 - 2"
+			}
+		case strings.Contains(allText, "เด็ก") || strings.Contains(allText, "กุมาร") || strings.Contains(allText, "สูติ") || strings.Contains(allText, "คลอด"):
+			matchedSlug = "maternal_child"
+			if nextBadge == "" {
+				nextBadge = "เด็ก / สูติฯ"
+			}
+		case strings.Contains(allText, "เภสัช") || strings.Contains(allText, "ร่มโพธิ์") || strings.Contains(allText, "จ่ายกลาง") || strings.Contains(allText, "ร่มฟ้า") || strings.Contains(allText, "ร่มฉัตร"):
+			matchedSlug = "support"
+			if nextBadge == "" {
+				nextBadge = "บริการ"
+			}
+		default:
+			matchedSlug = "specialty"
+			if nextBadge == "" {
+				nextBadge = "อาคาร"
+			}
+		}
+
+		if nextCode == "" {
+			nextCode = fmt.Sprintf("BLD-%02d", b.ID)
+		}
+		if nextCatID == nil {
+			if cid, ok := catIDBySlug[matchedSlug]; ok {
+				cCopy := cid
+				nextCatID = &cCopy
+			}
+		}
+
+		changed := nextCode != b.BuildingCode ||
+			nextBadge != b.BadgeLabel ||
+			nextFloors != b.FloorRange ||
+			nextStatus != b.ServiceStatus ||
+			(b.CategoryID == nil && nextCatID != nil)
+
+		if changed {
+			if err := DB.Exec(`
+				UPDATE map_nodes
+				SET building_code = ?,
+				    badge_label = ?,
+				    floor_range = ?,
+				    service_status = ?,
+				    category_id = ?
+				WHERE id = ?
+			`, nextCode, nextBadge, nextFloors, nextStatus, nextCatID, b.ID).Error; err != nil {
+				return err
+			}
+			updatedCount++
+		}
+	}
+
+	if updatedCount > 0 {
+		log.Printf("Backfilled building metadata for %d existing buildings", updatedCount)
+	}
 	return nil
 }

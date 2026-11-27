@@ -2,6 +2,7 @@
 
 import {
   Accessibility,
+  AlertTriangle,
   ArrowUpDown,
   Building2,
   Clock,
@@ -9,18 +10,22 @@ import {
   Loader2,
   MapPin,
   Navigation,
+  QrCode,
   RefreshCw,
   ShieldAlert,
+  Umbrella,
   X,
 } from "lucide-react";
-import type { MapNode, RouteResponse } from "@/lib/api";
+import type { Category, MapNode, RouteResponse } from "@/lib/api";
 import { buildTurnByTurnSteps, classifyBuilding } from "@/lib/hospital";
 
 interface RoutePanelProps {
   buildings: MapNode[];
+  categories?: Category[];
   originLabel: string;
   originMode: "gps" | "building";
   originBuildingId: number | null;
+  qrOriginNode?: MapNode | null;
   targetBuilding: MapNode | null;
   routeData: RouteResponse | null;
   isLoadingRoute: boolean;
@@ -37,9 +42,11 @@ interface RoutePanelProps {
 
 export default function RoutePanel({
   buildings,
+  categories,
   originLabel,
   originMode,
   originBuildingId,
+  qrOriginNode = null,
   targetBuilding,
   routeData,
   isLoadingRoute,
@@ -53,13 +60,22 @@ export default function RoutePanel({
   onEndNavigation,
   compactHeaderOnly = false,
 }: RoutePanelProps) {
+  const showQrNodeOption =
+    qrOriginNode && !buildings.some((b) => b.id === qrOriginNode.id);
+
   const originDestinationCard = (
     <div className="rounded-2xl bg-white border border-slate-200 p-3.5 shadow-[0_1px_2px_rgba(15,23,42,0.05)]">
       <div className="flex items-center gap-2.5">
         <div className="flex-1 min-w-0 space-y-2">
           {/* Origin row */}
           <div className="flex items-center gap-2.5">
-            <span className="w-3.5 h-3.5 rounded-full border-[3px] border-[#0F766E] bg-white shrink-0" />
+            {qrOriginNode &&
+            originMode === "building" &&
+            originBuildingId === qrOriginNode.id ? (
+              <QrCode className="w-4 h-4 text-[#0F766E] shrink-0" />
+            ) : (
+              <span className="w-3.5 h-3.5 rounded-full border-[3px] border-[#0F766E] bg-white shrink-0" />
+            )}
             <div className="flex-1 min-w-0">
               <label htmlFor="origin-selector" className="sr-only">
                 จุดเริ่มต้น
@@ -82,7 +98,14 @@ export default function RoutePanel({
                 }}
                 className="w-full min-h-[38px] text-sm font-medium text-slate-700 bg-slate-50 border border-slate-200 rounded-lg px-2.5 py-1 focus:outline-none focus:border-[#0F766E]"
               >
-                <option value="gps">จาก: {originMode === "gps" ? originLabel : "ตำแหน่งปัจจุบัน (GPS)"}</option>
+                <option value="gps">
+                  จาก: {originMode === "gps" ? originLabel : "ตำแหน่งปัจจุบัน (GPS)"}
+                </option>
+                {showQrNodeOption && qrOriginNode && (
+                  <option value={String(qrOriginNode.id)}>
+                    จาก (QR): {qrOriginNode.name || `จุด #${qrOriginNode.id}`}
+                  </option>
+                )}
                 {buildings.map((b) => (
                   <option key={`origin-${b.id}`} value={String(b.id)}>
                     จาก: {b.name}
@@ -133,14 +156,35 @@ export default function RoutePanel({
 
   const steps = routeData ? buildTurnByTurnSteps(routeData, originLabel) : [];
   const targetBadge = routeData?.target_building
-    ? classifyBuilding(routeData.target_building)
+    ? classifyBuilding(routeData.target_building, categories)
     : targetBuilding
-    ? classifyBuilding(targetBuilding)
+    ? classifyBuilding(targetBuilding, categories)
     : null;
   const roundedDist = routeData ? Math.round(routeData.total_distance_m) : 0;
   const roundedMin = routeData
     ? Math.max(1, Math.round(routeData.estimated_walk_min))
     : 0;
+
+  const isWheelchairFriendly = routeData?.is_wheelchair_friendly !== false;
+  const hasCoveredWalkway = Boolean(routeData?.has_covered_walkway);
+  const hasIndoorPassthrough = Boolean(routeData?.has_indoor_passthrough);
+
+  const uniqueClosureReasons = Array.from(
+    new Set(
+      (routeData?.closed_notices ?? [])
+        .map((n) => (n.closure_reason || "").trim())
+        .filter((r) => r.length > 0)
+    )
+  );
+
+  const edgeHighlights = (routeData?.route_edges ?? []).filter(
+    (e) => (e.instruction || "").trim().length > 0
+  );
+
+  const targetDepts =
+    routeData?.target_building?.departments ??
+    targetBuilding?.departments ??
+    [];
 
   return (
     <div className="space-y-4">
@@ -230,14 +274,18 @@ export default function RoutePanel({
               </h3>
               {targetBadge && (
                 <span
-                  className="inline-flex items-center mt-1.5 px-2.5 py-0.5 rounded-md text-xs font-bold border"
+                  className="inline-flex items-center gap-1.5 mt-1.5 px-2.5 py-0.5 rounded-md text-xs font-bold border"
                   style={{
                     color: targetBadge.badgeStyle.text,
                     backgroundColor: targetBadge.badgeStyle.bg,
                     borderColor: targetBadge.badgeStyle.border,
                   }}
                 >
-                  {targetBadge.badgeLabel}
+                  <span
+                    className="w-2 h-2 rounded-full shrink-0"
+                    style={{ backgroundColor: targetBadge.accentColor }}
+                  />
+                  <span>{targetBadge.badgeLabel}</span>
                 </span>
               )}
             </div>
@@ -253,13 +301,51 @@ export default function RoutePanel({
             </div>
           </div>
 
-          {/* Essential Accessibility Badge */}
+          {/* Real Edge Feature Badges from map_edges */}
           <div className="flex flex-wrap gap-2">
-            <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-[#DBEAFE] text-[#1D4ED8] text-xs font-semibold">
-              <Accessibility className="w-3.5 h-3.5" />
-              <span>รองรับทางลาดรถเข็น</span>
-            </span>
+            {isWheelchairFriendly ? (
+              <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-[#DBEAFE] text-[#1D4ED8] text-xs font-semibold">
+                <Accessibility className="w-3.5 h-3.5" />
+                <span>รองรับทางลาดรถเข็น</span>
+              </span>
+            ) : (
+              <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-amber-100 text-amber-900 text-xs font-semibold">
+                <AlertTriangle className="w-3.5 h-3.5" />
+                <span>มีช่วงที่อาจไม่เหมาะกับรถเข็น</span>
+              </span>
+            )}
+
+            {hasCoveredWalkway && (
+              <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-sky-50 border border-sky-200 text-sky-800 text-xs font-semibold">
+                <Umbrella className="w-3.5 h-3.5" />
+                <span>ทางเชื่อมมีหลังคา</span>
+              </span>
+            )}
+
+            {hasIndoorPassthrough && (
+              <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-violet-50 border border-violet-200 text-violet-800 text-xs font-semibold">
+                <Building2 className="w-3.5 h-3.5" />
+                <span>ทางเดินผ่านชั้นล่างตึก</span>
+              </span>
+            )}
           </div>
+
+          {/* Closed Walkway Notice Banner (closure_reason from map_edges) */}
+          {uniqueClosureReasons.length > 0 && (
+            <div className="rounded-xl bg-amber-50 border border-amber-200 p-3 flex items-start gap-2.5">
+              <AlertTriangle className="w-4 h-4 text-amber-700 shrink-0 mt-0.5" />
+              <div className="min-w-0 space-y-1">
+                <p className="text-xs font-bold text-amber-900">
+                  แจ้งเตือนเส้นทางปิดปรับปรุง (ระบบเลี่ยงเส้นทางให้อัตโนมัติ)
+                </p>
+                <ul className="space-y-0.5 text-xs text-amber-800 list-disc pl-4">
+                  {uniqueClosureReasons.map((reason, idx) => (
+                    <li key={`closure-${idx}`}>{reason}</li>
+                  ))}
+                </ul>
+              </div>
+            </div>
+          )}
 
           {/* Primary Start / End Active Navigation CTA */}
           {onStartNavigation && (
@@ -330,6 +416,72 @@ export default function RoutePanel({
               ))}
             </ol>
           </div>
+
+          {/* Specific Walkway Notes from traversed edges */}
+          {edgeHighlights.length > 0 && (
+            <div className="rounded-xl bg-slate-50 border border-slate-200 p-3 space-y-1.5">
+              <p className="text-xs font-bold text-slate-700">
+                หมายเหตุจุดสำคัญระหว่างทาง
+              </p>
+              <ul className="space-y-1.5">
+                {edgeHighlights.map((edge) => (
+                  <li
+                    key={`edge-note-${edge.id}`}
+                    className="text-xs text-slate-600 flex items-start justify-between gap-2"
+                  >
+                    <span>{edge.instruction}</span>
+                    <span className="shrink-0 flex items-center gap-1">
+                      {edge.is_covered && (
+                        <span className="px-1.5 py-0.5 rounded bg-sky-100 text-sky-800 text-[10px] font-bold">
+                          มีหลังคา
+                        </span>
+                      )}
+                      {edge.is_indoor_passthrough && (
+                        <span className="px-1.5 py-0.5 rounded bg-violet-100 text-violet-800 text-[10px] font-bold">
+                          ผ่านชั้นล่างตึก
+                        </span>
+                      )}
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+
+          {/* Structured Departments inside Target Building */}
+          {targetDepts.length > 0 && (
+            <div className="rounded-xl bg-slate-50 border border-slate-200 p-3.5 space-y-2">
+              <div className="flex items-center gap-1.5 text-xs font-bold text-[#0F172A]">
+                <Building2 className="w-3.5 h-3.5 text-[#0F766E]" />
+                <span>แผนกและคลินิกภายในอาคารนี้ ({targetDepts.length})</span>
+              </div>
+              <div className="space-y-1.5">
+                {targetDepts.map((dept) => (
+                  <div
+                    key={`route-dept-${dept.id}`}
+                    className="rounded-lg bg-white border border-slate-100 px-2.5 py-1.5 flex items-start justify-between gap-2 text-xs"
+                  >
+                    <div className="min-w-0">
+                      <p className="font-semibold text-slate-800">
+                        {dept.name}
+                      </p>
+                      {dept.operating_hours && (
+                        <p className="text-[11px] text-slate-500 mt-0.5 inline-flex items-center gap-1">
+                          <Clock className="w-3 h-3 shrink-0" />
+                          <span>{dept.operating_hours}</span>
+                        </p>
+                      )}
+                    </div>
+                    {dept.floor && (
+                      <span className="shrink-0 px-2 py-0.5 rounded bg-teal-50 border border-teal-200 text-[11px] font-bold text-[#0F766E]">
+                        {dept.floor}
+                      </span>
+                    )}
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
 
           {/* Indoor Guide Highlight Box */}
           {routeData.target_building.indoor_guide && (

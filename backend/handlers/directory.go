@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
@@ -68,6 +69,17 @@ func CreateCategory(c *gin.Context) {
 		c.JSON(http.StatusConflict, gin.H{"error": "ไม่สามารถสร้างหมวดหมู่ได้ (slug อาจซ้ำกัน)"})
 		return
 	}
+	RecordAuditLog(c, AuditEntry{
+		ActionType:  "category_create",
+		ActionLabel: "เพิ่มหมวดหมู่ใหม่",
+		EntityType:  "category",
+		EntityID:    item.ID,
+		BadgeText:   "CAT",
+		TargetTitle: fmt.Sprintf("หมวดหมู่: %s", item.Name),
+		Summary:     fmt.Sprintf("เพิ่มหมวดหมู่ใหม่ \"%s\" (%s)", item.Name, item.Slug),
+		Before:      nil,
+		After:       item,
+	})
 	c.JSON(http.StatusCreated, item)
 }
 
@@ -87,6 +99,7 @@ func UpdateCategory(c *gin.Context) {
 		c.JSON(http.StatusNotFound, gin.H{"error": "ไม่พบหมวดหมู่ที่ต้องการแก้ไข"})
 		return
 	}
+	beforeSnap := item
 
 	item.Name = strings.TrimSpace(req.Name)
 	item.Slug = strings.ToLower(strings.TrimSpace(req.Slug))
@@ -105,6 +118,17 @@ func UpdateCategory(c *gin.Context) {
 		c.JSON(http.StatusConflict, gin.H{"error": "ไม่สามารถบันทึกหมวดหมู่ได้ (slug อาจซ้ำกัน)"})
 		return
 	}
+	RecordAuditLog(c, AuditEntry{
+		ActionType:  "category_update",
+		ActionLabel: "แก้ไขหมวดหมู่",
+		EntityType:  "category",
+		EntityID:    item.ID,
+		BadgeText:   "CAT",
+		TargetTitle: fmt.Sprintf("หมวดหมู่: %s", item.Name),
+		Summary:     fmt.Sprintf("อัปเดตหมวดหมู่ \"%s\"", item.Name),
+		Before:      beforeSnap,
+		After:       item,
+	})
 	c.JSON(http.StatusOK, item)
 }
 
@@ -114,15 +138,28 @@ func DeleteCategory(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "รหัสหมวดหมู่ไม่ถูกต้อง"})
 		return
 	}
+	var before models.Category
+	if err := config.DB.First(&before, id).Error; err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "ไม่พบหมวดหมู่ที่ต้องการลบ"})
+		return
+	}
+	_ = config.DB.Model(&models.MapNode{}).Where("category_id = ?", id).Update("category_id", nil).Error
 	res := config.DB.Delete(&models.Category{}, id)
 	if res.Error != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "ไม่สามารถลบหมวดหมู่ได้"})
 		return
 	}
-	if res.RowsAffected == 0 {
-		c.JSON(http.StatusNotFound, gin.H{"error": "ไม่พบหมวดหมู่ที่ต้องการลบ"})
-		return
-	}
+	RecordAuditLog(c, AuditEntry{
+		ActionType:  "category_delete",
+		ActionLabel: "ลบหมวดหมู่",
+		EntityType:  "category",
+		EntityID:    before.ID,
+		BadgeText:   "CAT",
+		TargetTitle: fmt.Sprintf("หมวดหมู่: %s", before.Name),
+		Summary:     fmt.Sprintf("ลบหมวดหมู่ \"%s\"", before.Name),
+		Before:      before,
+		After:       nil,
+	})
 	c.JSON(http.StatusOK, gin.H{"message": "ลบหมวดหมู่เรียบร้อยแล้ว", "id": id})
 }
 
@@ -159,8 +196,8 @@ func CreateDepartment(c *gin.Context) {
 		return
 	}
 
-	var count int64
-	if err := config.DB.Model(&models.MapNode{}).Where("id = ?", req.NodeID).Count(&count).Error; err != nil || count == 0 {
+	var node models.MapNode
+	if err := config.DB.First(&node, req.NodeID).Error; err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "ไม่พบอาคาร (node_id) ที่เลือกในระบบ"})
 		return
 	}
@@ -177,6 +214,17 @@ func CreateDepartment(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "ไม่สามารถสร้างแผนกได้"})
 		return
 	}
+	RecordAuditLog(c, AuditEntry{
+		ActionType:  "department_create",
+		ActionLabel: "แก้ไขข้อมูลตึก",
+		EntityType:  "department",
+		EntityID:    item.ID,
+		BadgeText:   node.BadgeLabel,
+		TargetTitle: node.Name,
+		Summary:     fmt.Sprintf("เพิ่มแผนก \"%s\" (%s)", item.Name, item.Floor),
+		Before:      nil,
+		After:       item,
+	})
 	c.JSON(http.StatusCreated, item)
 }
 
@@ -192,8 +240,8 @@ func UpdateDepartment(c *gin.Context) {
 		return
 	}
 
-	var nodeCount int64
-	if err := config.DB.Model(&models.MapNode{}).Where("id = ?", req.NodeID).Count(&nodeCount).Error; err != nil || nodeCount == 0 {
+	var node models.MapNode
+	if err := config.DB.First(&node, req.NodeID).Error; err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "ไม่พบอาคาร (node_id) ที่เลือกในระบบ"})
 		return
 	}
@@ -203,6 +251,7 @@ func UpdateDepartment(c *gin.Context) {
 		c.JSON(http.StatusNotFound, gin.H{"error": "ไม่พบแผนกที่ต้องการแก้ไข"})
 		return
 	}
+	beforeSnap := item
 
 	item.NodeID = req.NodeID
 	item.Name = strings.TrimSpace(req.Name)
@@ -215,6 +264,17 @@ func UpdateDepartment(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "ไม่สามารถบันทึกข้อมูลแผนกได้"})
 		return
 	}
+	RecordAuditLog(c, AuditEntry{
+		ActionType:  "department_update",
+		ActionLabel: "แก้ไขข้อมูลตึก",
+		EntityType:  "department",
+		EntityID:    item.ID,
+		BadgeText:   node.BadgeLabel,
+		TargetTitle: node.Name,
+		Summary:     fmt.Sprintf("อัปเดตแผนก \"%s\" (%s)", item.Name, item.Floor),
+		Before:      beforeSnap,
+		After:       item,
+	})
 	c.JSON(http.StatusOK, item)
 }
 
@@ -224,15 +284,34 @@ func DeleteDepartment(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "รหัสแผนกไม่ถูกต้อง"})
 		return
 	}
+	var before models.Department
+	if err := config.DB.First(&before, id).Error; err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "ไม่พบแผนกที่ต้องการลบ"})
+		return
+	}
+	var node models.MapNode
+	_ = config.DB.First(&node, before.NodeID).Error
+
 	res := config.DB.Delete(&models.Department{}, id)
 	if res.Error != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "ไม่สามารถลบแผนกได้"})
 		return
 	}
-	if res.RowsAffected == 0 {
-		c.JSON(http.StatusNotFound, gin.H{"error": "ไม่พบแผนกที่ต้องการลบ"})
-		return
+	targetTitle := node.Name
+	if targetTitle == "" {
+		targetTitle = fmt.Sprintf("อาคาร #%d", before.NodeID)
 	}
+	RecordAuditLog(c, AuditEntry{
+		ActionType:  "department_delete",
+		ActionLabel: "แก้ไขข้อมูลตึก",
+		EntityType:  "department",
+		EntityID:    before.ID,
+		BadgeText:   node.BadgeLabel,
+		TargetTitle: targetTitle,
+		Summary:     fmt.Sprintf("ลบแผนก \"%s\" (%s)", before.Name, before.Floor),
+		Before:      before,
+		After:       nil,
+	})
 	c.JSON(http.StatusOK, gin.H{"message": "ลบแผนกเรียบร้อยแล้ว", "id": id})
 }
 

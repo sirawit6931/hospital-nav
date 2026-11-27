@@ -8,11 +8,12 @@ import {
   Search,
   X,
 } from "lucide-react";
-import type { MapNode } from "@/lib/api";
+import type { Category, MapNode } from "@/lib/api";
 import { classifyBuilding } from "@/lib/hospital";
 
 interface ArrivalModalProps {
   building: MapNode;
+  categories?: Category[];
   distanceMeters: number;
   onClose: () => void;
   onSearchAnother: () => void;
@@ -20,11 +21,12 @@ interface ArrivalModalProps {
 
 export default function ArrivalModal({
   building,
+  categories,
   distanceMeters,
   onClose,
   onSearchAnother,
 }: ArrivalModalProps) {
-  const badge = classifyBuilding(building);
+  const badge = classifyBuilding(building, categories);
 
   return (
     <div

@@ -1,17 +1,29 @@
 "use client";
 
 import "leaflet/dist/leaflet.css";
-import { useMemo } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import L from "leaflet";
 import {
   MapContainer,
   Marker,
+  Pane,
+  Polygon,
   Polyline,
   TileLayer,
   Tooltip,
+  useMap,
   useMapEvents,
 } from "react-leaflet";
-import { Box, Globe, Map as MapIcon } from "lucide-react";
+import {
+  Box,
+  Globe,
+  Info,
+  Layers,
+  Map as MapIcon,
+  RefreshCw,
+  RotateCcw,
+  X,
+} from "lucide-react";
 import type { MapEdge, MapNode, SurveyTrack } from "@/lib/api";
 import {
   ESRI_SATELLITE_ATTRIBUTION,
@@ -21,7 +33,22 @@ import {
   OSM_STREET_ATTRIBUTION,
   OSM_STREET_URL,
 } from "@/lib/hospital";
-import type { MapViewMode } from "@/lib/hospital3d";
+import type { MapViewMode, SakonHospital3DDataset } from "@/lib/hospital3d";
+
+const HOSPITAL_CAMPUS_CENTER: [number, number] = [17.1633, 104.1581];
+const HOSPITAL_MAX_BOUNDS: [[number, number], [number, number]] = [
+  [17.1606, 104.1551],
+  [17.1656, 104.1609],
+];
+const OUTSIDE_MASK_RING: [number, number][] = [
+  [-90, -180],
+  [-90, 180],
+  [90, 180],
+  [90, -180],
+];
+const CAMPUS_MASK_COLOR = "#E8EEF3";
+
+let cachedAdminCampusDataset: SakonHospital3DDataset | null = null;
 
 export type AdminEditorMode =
   | "add_node"
@@ -42,6 +69,10 @@ interface AdminMapEditorProps {
   onMapClick: (lat: number, lng: number) => void;
   onNodeClick: (node: MapNode) => void;
   onEdgeClick: (edge: MapEdge) => void;
+  splitTrackId?: number | null;
+  onSplitTrackClick?: (trackId: number, lat: number, lng: number) => void;
+  onRefresh?: () => void;
+  isRefreshing?: boolean;
 }
 
 function createAdminNodeIcon(
@@ -92,6 +123,28 @@ function MapClickListener({
   return null;
 }
 
+function MapAutoController({ resetTrigger }: { resetTrigger: number }) {
+  const map = useMap();
+
+  useEffect(() => {
+    const container = map.getContainer();
+    if (!container || typeof ResizeObserver === "undefined") return;
+    const ro = new ResizeObserver(() => {
+      map.invalidateSize();
+    });
+    ro.observe(container);
+    return () => ro.disconnect();
+  }, [map]);
+
+  useEffect(() => {
+    if (resetTrigger > 0) {
+      map.flyTo(HOSPITAL_CENTER, HOSPITAL_DEFAULT_ZOOM, { duration: 0.55 });
+    }
+  }, [map, resetTrigger]);
+
+  return null;
+}
+
 export default function AdminMapEditor({
   mapViewMode,
   onChangeMapViewMode,
@@ -104,7 +157,63 @@ export default function AdminMapEditor({
   onMapClick,
   onNodeClick,
   onEdgeClick,
+  splitTrackId = null,
+  onSplitTrackClick,
+  onRefresh,
+  isRefreshing = false,
 }: AdminMapEditorProps) {
+  const [controlsOpen, setControlsOpen] = useState(false);
+  const [legendOpen, setLegendOpen] = useState(false);
+  const [resetTrigger, setResetTrigger] = useState(0);
+  const [campusDataset, setCampusDataset] =
+    useState<SakonHospital3DDataset | null>(cachedAdminCampusDataset);
+  const controlsPopoverRef = useRef<HTMLDivElement | null>(null);
+  const legendPopoverRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    if (cachedAdminCampusDataset) {
+      setCampusDataset(cachedAdminCampusDataset);
+      return;
+    }
+    let cancelled = false;
+    fetch("/data/sakon-hospital-3d.json")
+      .then((res) => res.json())
+      .then((data: SakonHospital3DDataset) => {
+        cachedAdminCampusDataset = data;
+        if (!cancelled) setCampusDataset(data);
+      })
+      .catch(() => {
+        // Keep maxBounds fallback
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const campusRingLatLng = useMemo<[number, number][] | null>(() => {
+    const ring = campusDataset?.campus?.features?.[0]?.geometry?.coordinates?.[0];
+    if (!ring || ring.length < 3) return null;
+    return ring.map(([lng, lat]) => [lat, lng]);
+  }, [campusDataset]);
+
+  useEffect(() => {
+    const handleOutside = (e: MouseEvent | TouchEvent) => {
+      const target = e.target as Node;
+      if (controlsPopoverRef.current && !controlsPopoverRef.current.contains(target)) {
+        setControlsOpen(false);
+      }
+      if (legendPopoverRef.current && !legendPopoverRef.current.contains(target)) {
+        setLegendOpen(false);
+      }
+    };
+    document.addEventListener("mousedown", handleOutside);
+    document.addEventListener("touchstart", handleOutside);
+    return () => {
+      document.removeEventListener("mousedown", handleOutside);
+      document.removeEventListener("touchstart", handleOutside);
+    };
+  }, []);
+
   const nodeById = useMemo(() => {
     const map = new Map<number, MapNode>();
     for (const n of nodes) {
@@ -113,20 +222,26 @@ export default function AdminMapEditor({
     return map;
   }, [nodes]);
 
+  const isStreet = mapViewMode === "street";
+
   return (
-    <div className="relative w-full h-full">
+    <div className="relative w-full h-full bg-[#E8EEF3]">
       <MapContainer
-        center={HOSPITAL_CENTER}
+        center={HOSPITAL_CAMPUS_CENTER || HOSPITAL_CENTER}
         zoom={HOSPITAL_DEFAULT_ZOOM}
+        minZoom={16.5}
         maxZoom={20}
         zoomSnap={0.25}
         zoomDelta={0.5}
         wheelPxPerZoomLevel={120}
+        maxBounds={HOSPITAL_MAX_BOUNDS}
+        maxBoundsViscosity={1.0}
+        style={{ background: CAMPUS_MASK_COLOR }}
         className={`w-full h-full z-0 ${
           mode === "add_node" ? "cursor-crosshair" : ""
         }`}
       >
-        {mapViewMode === "street" ? (
+        {isStreet ? (
           <TileLayer
             key="admin-osm"
             url={OSM_STREET_URL}
@@ -144,12 +259,53 @@ export default function AdminMapEditor({
           />
         )}
 
+        {/* 100% Opaque Inverse Mask hiding everything outside Sakon Nakhon Hospital */}
+        <Pane
+          name="admin-campus-mask-pane"
+          style={{ zIndex: 350, pointerEvents: "none" }}
+        >
+          {campusRingLatLng && (
+            <Polygon
+              positions={[OUTSIDE_MASK_RING, campusRingLatLng]}
+              interactive={false}
+              pathOptions={{
+                stroke: false,
+                fillColor: CAMPUS_MASK_COLOR,
+                fillOpacity: 1,
+                fillRule: "evenodd",
+              }}
+            />
+          )}
+        </Pane>
+
+        {campusRingLatLng && (
+          <Polygon
+            positions={campusRingLatLng}
+            interactive={false}
+            pathOptions={{
+              fill: false,
+              color: isStreet ? "#0F766E" : "#14B8A6",
+              weight: 2.8,
+              opacity: 0.95,
+              dashArray: "8 6",
+            }}
+          />
+        )}
+
+        <MapAutoController resetTrigger={resetTrigger} />
+
         <MapClickListener
-          enabled={mode === "add_node"}
-          onMapClick={onMapClick}
+          enabled={mode === "add_node" || splitTrackId !== null}
+          onMapClick={(lat, lng) => {
+            if (splitTrackId !== null) {
+              onSplitTrackClick?.(splitTrackId, lat, lng);
+              return;
+            }
+            onMapClick(lat, lng);
+          }}
         />
 
-        {/* Survey Tracks Overlay (Mode 5 - Orange Polylines) */}
+        {/* Survey Tracks Overlay (Mode 5 - Per-track distinct colors + Split Track click) */}
         {showSurveys &&
           surveys.map((track) => {
             const pts = Array.isArray(track.points_json)
@@ -162,21 +318,37 @@ export default function AdminMapEditor({
                 )
               : [];
             if (pts.length < 2) return null;
+            const isSplittingThis = splitTrackId === track.id;
 
             return (
               <Polyline
                 key={`survey-${track.id}`}
                 positions={pts}
                 pathOptions={{
-                  color: "#F97316",
-                  weight: 5,
-                  opacity: 0.9,
+                  color: track.color_hex || "#F97316",
+                  weight: isSplittingThis ? 8 : 5,
+                  opacity: 0.92,
                   lineCap: "round",
                   lineJoin: "round",
                 }}
+                eventHandlers={
+                  isSplittingThis
+                    ? {
+                        click: (e) => {
+                          L.DomEvent.stopPropagation(e);
+                          onSplitTrackClick?.(
+                            track.id,
+                            e.latlng.lat,
+                            e.latlng.lng
+                          );
+                        },
+                      }
+                    : undefined
+                }
               >
                 <Tooltip sticky className="hospital-pin-label">
-                  รอยเดินสำรวจ: {track.name} ({pts.length} จุด)
+                  {track.name} ({pts.length} จุด)
+                  {isSplittingThis ? " • คลิกเพื่อตัดแบ่งตรงนี้" : ""}
                 </Tooltip>
               </Polyline>
             );
@@ -255,74 +427,184 @@ export default function AdminMapEditor({
         })}
       </MapContainer>
 
-      {/* 3-Mode Map Switcher */}
+      {/* Top-Right Collapsible Layers Popover (collapsed by default) */}
       <div
-        role="group"
-        aria-label="เลือกโหมดแผนที่ผู้ดูแล"
-        className="absolute top-3 right-3 z-[400] inline-flex items-center p-1 rounded-xl bg-white/95 backdrop-blur border border-slate-200 shadow-md"
+        ref={controlsPopoverRef}
+        className="absolute top-[70px] right-3 z-[400] flex flex-col items-end gap-2"
       >
-        <button
-          type="button"
-          onClick={() => onChangeMapViewMode("3d")}
-          className={`min-h-[38px] px-3 rounded-lg text-xs font-bold flex items-center gap-1.5 transition-colors cursor-pointer ${
-            mapViewMode === "3d"
-              ? "bg-[#0F766E] text-white shadow-xs"
-              : "text-slate-600 hover:bg-slate-100"
-          }`}
-        >
-          <Box className="w-3.5 h-3.5" />
-          <span>แผนที่ 3D</span>
-        </button>
-        <button
-          type="button"
-          onClick={() => onChangeMapViewMode("satellite")}
-          className={`min-h-[38px] px-3 rounded-lg text-xs font-bold flex items-center gap-1.5 transition-colors cursor-pointer ${
-            mapViewMode === "satellite"
-              ? "bg-[#0F766E] text-white shadow-xs"
-              : "text-slate-600 hover:bg-slate-100"
-          }`}
-        >
-          <Globe className="w-3.5 h-3.5" />
-          <span>ดาวเทียม</span>
-        </button>
-        <button
-          type="button"
-          onClick={() => onChangeMapViewMode("street")}
-          className={`min-h-[38px] px-3 rounded-lg text-xs font-bold flex items-center gap-1.5 transition-colors cursor-pointer ${
-            mapViewMode === "street"
-              ? "bg-[#0F766E] text-white shadow-xs"
-              : "text-slate-600 hover:bg-slate-100"
-          }`}
-        >
-          <MapIcon className="w-3.5 h-3.5" />
-          <span>แผนที่ถนน</span>
-        </button>
+        <div className="relative">
+          <button
+            type="button"
+            onClick={() => setControlsOpen((prev) => !prev)}
+            title="ชั้นข้อมูลและการแสดงผลแผนที่"
+            aria-label="ชั้นข้อมูลและการแสดงผลแผนที่"
+            aria-expanded={controlsOpen}
+            className={`w-10 h-10 rounded-xl border shadow-md flex items-center justify-center transition-colors cursor-pointer ${
+              controlsOpen
+                ? "bg-[#0F766E] border-[#0F766E] text-white"
+                : "bg-white/95 backdrop-blur border-slate-200 text-slate-700 hover:bg-slate-50"
+            }`}
+          >
+            <Layers className="w-4 h-4" />
+          </button>
+
+          {controlsOpen && (
+            <div className="absolute top-0 right-12 w-60 rounded-2xl bg-white/98 backdrop-blur border border-slate-200 shadow-xl p-3 space-y-3">
+              <div className="flex items-center justify-between">
+                <span className="text-xs font-bold text-[#0F172A]">
+                  ชั้นข้อมูลและการแสดงผล
+                </span>
+                <button
+                  type="button"
+                  onClick={() => setControlsOpen(false)}
+                  aria-label="ปิดแผงควบคุม"
+                  className="w-6 h-6 rounded-lg hover:bg-slate-100 text-slate-400 flex items-center justify-center cursor-pointer"
+                >
+                  <X className="w-3.5 h-3.5" />
+                </button>
+              </div>
+
+              <div className="grid grid-cols-3 gap-1 p-1 rounded-xl bg-slate-100">
+                <button
+                  type="button"
+                  onClick={() => {
+                    onChangeMapViewMode("3d");
+                    setControlsOpen(false);
+                  }}
+                  className={`min-h-[34px] rounded-lg text-[11px] font-bold flex items-center justify-center gap-1 transition-colors cursor-pointer ${
+                    mapViewMode === "3d"
+                      ? "bg-[#0F766E] text-white shadow-xs"
+                      : "text-slate-600 hover:bg-white"
+                  }`}
+                >
+                  <Box className="w-3.5 h-3.5" />
+                  <span>3D</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    onChangeMapViewMode("satellite");
+                    setControlsOpen(false);
+                  }}
+                  className={`min-h-[34px] rounded-lg text-[11px] font-bold flex items-center justify-center gap-1 transition-colors cursor-pointer ${
+                    mapViewMode === "satellite"
+                      ? "bg-[#0F766E] text-white shadow-xs"
+                      : "text-slate-600 hover:bg-white"
+                  }`}
+                >
+                  <Globe className="w-3.5 h-3.5" />
+                  <span>ดาวเทียม</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    onChangeMapViewMode("street");
+                    setControlsOpen(false);
+                  }}
+                  className={`min-h-[34px] rounded-lg text-[11px] font-bold flex items-center justify-center gap-1 transition-colors cursor-pointer ${
+                    mapViewMode === "street"
+                      ? "bg-[#0F766E] text-white shadow-xs"
+                      : "text-slate-600 hover:bg-white"
+                  }`}
+                >
+                  <MapIcon className="w-3.5 h-3.5" />
+                  <span>ถนน</span>
+                </button>
+              </div>
+
+              <div className="grid grid-cols-2 gap-1.5">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setResetTrigger((n) => n + 1);
+                    setControlsOpen(false);
+                  }}
+                  className="min-h-[36px] px-2.5 rounded-xl border border-slate-200 bg-white hover:bg-slate-50 text-xs font-semibold text-slate-700 flex items-center justify-center gap-1.5 cursor-pointer"
+                >
+                  <RotateCcw className="w-3.5 h-3.5" />
+                  <span>รีเซ็ตมุมกล้อง</span>
+                </button>
+                {onRefresh && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      onRefresh();
+                      setControlsOpen(false);
+                    }}
+                    disabled={isRefreshing}
+                    className="min-h-[36px] px-2.5 rounded-xl border border-slate-200 bg-white hover:bg-slate-50 disabled:opacity-60 text-xs font-semibold text-slate-700 flex items-center justify-center gap-1.5 cursor-pointer"
+                  >
+                    <RefreshCw
+                      className={`w-3.5 h-3.5 ${isRefreshing ? "animate-spin" : ""}`}
+                    />
+                    <span>รีเฟรช</span>
+                  </button>
+                )}
+              </div>
+            </div>
+          )}
+        </div>
       </div>
 
-      {/* Bottom Legend */}
-      <div className="absolute bottom-4 left-4 z-[400] rounded-xl bg-white/95 backdrop-blur border border-slate-200 shadow-md px-3.5 py-2 flex flex-wrap items-center gap-4 text-xs font-semibold text-slate-700">
-        <span className="flex items-center gap-1.5">
-          <span className="w-3 h-3 rounded-full bg-[#0F766E] inline-block" />
-          อาคาร (is_building)
-        </span>
-        <span className="flex items-center gap-1.5">
-          <span className="w-2.5 h-2.5 rounded-full bg-[#1D4ED8] inline-block" />
-          จุดแยกทางเดิน
-        </span>
-        <span className="flex items-center gap-1.5">
-          <span className="w-4 h-1 bg-[#0EA5E9] inline-block rounded" />
-          เส้นทางเปิด
-        </span>
-        <span className="flex items-center gap-1.5">
-          <span className="w-4 border-t-2 border-dashed border-[#DC2626] inline-block" />
-          เส้นทางปิดซ่อมแซม
-        </span>
-        {showSurveys && (
-          <span className="flex items-center gap-1.5">
-            <span className="w-4 h-1 bg-[#F97316] inline-block rounded" />
-            Survey Track
-          </span>
+      {/* Bottom-Left Collapsible Legend ("คำอธิบายสี") — collapsed by default */}
+      <div
+        ref={legendPopoverRef}
+        className="absolute bottom-4 left-3 z-[400]"
+      >
+        {legendOpen && (
+          <div className="mb-2 w-56 rounded-2xl bg-white/98 backdrop-blur border border-slate-200 shadow-lg p-3 space-y-2 text-xs font-semibold text-slate-700">
+            <div className="flex items-center justify-between pb-1 border-b border-slate-100">
+              <span className="text-[#0F172A] font-bold">คำอธิบายสีแผนที่</span>
+              <button
+                type="button"
+                onClick={() => setLegendOpen(false)}
+                aria-label="ปิดคำอธิบายสี"
+                className="w-6 h-6 rounded-lg hover:bg-slate-100 text-slate-400 flex items-center justify-center cursor-pointer"
+              >
+                <X className="w-3.5 h-3.5" />
+              </button>
+            </div>
+            <div className="grid grid-cols-1 gap-1.5">
+              <span className="flex items-center gap-2">
+                <span className="w-3 h-3 rounded-full bg-[#0F766E] inline-block shrink-0" />
+                อาคาร (is_building)
+              </span>
+              <span className="flex items-center gap-2">
+                <span className="w-2.5 h-2.5 rounded-full bg-[#1D4ED8] inline-block shrink-0" />
+                จุดแยกทางเดิน
+              </span>
+              <span className="flex items-center gap-2">
+                <span className="w-4 h-1 bg-[#0EA5E9] inline-block rounded shrink-0" />
+                เส้นทางเปิด
+              </span>
+              <span className="flex items-center gap-2">
+                <span className="w-4 border-t-2 border-dashed border-[#DC2626] inline-block shrink-0" />
+                เส้นทางปิดซ่อมแซม
+              </span>
+              {showSurveys && (
+                <span className="flex items-center gap-2">
+                  <span className="w-4 h-1 bg-[#F97316] inline-block rounded shrink-0" />
+                  Survey Track
+                </span>
+              )}
+            </div>
+          </div>
         )}
+
+        <button
+          type="button"
+          onClick={() => setLegendOpen((prev) => !prev)}
+          title="คำอธิบายสี"
+          aria-expanded={legendOpen}
+          className={`h-9 px-3 rounded-xl border shadow-md text-xs font-semibold inline-flex items-center gap-1.5 transition-colors cursor-pointer ${
+            legendOpen
+              ? "bg-[#0F766E] border-[#0F766E] text-white"
+              : "bg-white/95 backdrop-blur border-slate-200 text-slate-700 hover:bg-slate-50"
+          }`}
+        >
+          <Info className="w-3.5 h-3.5" />
+          <span>คำอธิบายสี</span>
+        </button>
       </div>
     </div>
   );

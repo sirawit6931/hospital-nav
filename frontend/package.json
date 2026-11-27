@@ -10,11 +10,13 @@
     "postinstall": "node -e \"const fs=require('fs');const src=fs.existsSync('node_modules/maplibre-gl/dist/maplibre-gl-worker.mjs')?'node_modules/maplibre-gl/dist/maplibre-gl-worker.mjs':'node_modules/maplibre-gl/dist/maplibre-gl-csp-worker.js';if(fs.existsSync(src)){fs.mkdirSync('public',{recursive:true});fs.copyFileSync(src,'public/maplibre-gl-csp-worker.js');}\""
   },
   "dependencies": {
+    "@types/qrcode": "^1.5.6",
     "axios": "^1.21.1",
     "leaflet": "^1.9.4",
     "lucide-react": "^1.80.0",
     "maplibre-gl": "^6.19.0",
     "next": "16.4.6",
+    "qrcode": "^1.5.4",
     "react": "19.3.0",
     "react-dom": "19.3.0",
     "react-leaflet": "^5.0.0"

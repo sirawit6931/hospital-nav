@@ -31,7 +31,7 @@ import {
   RotateCcw,
   X,
 } from "lucide-react";
-import type { MapNode, RouteResponse } from "@/lib/api";
+import type { Category, MapNode, RouteResponse } from "@/lib/api";
 import {
   ESRI_SATELLITE_ATTRIBUTION,
   ESRI_SATELLITE_URL,
@@ -67,6 +67,7 @@ interface PublicNavigationMapProps {
   mapViewMode: MapViewMode;
   onChangeMapViewMode: (mode: MapViewMode) => void;
   buildings: MapNode[];
+  categories?: Category[];
   displayOriginCoords: [number, number];
   rawOriginCoords: [number, number];
   userHeadingDeg: number;
@@ -255,6 +256,7 @@ export default function PublicNavigationMap({
   mapViewMode,
   onChangeMapViewMode,
   buildings,
+  categories = [],
   displayOriginCoords,
   rawOriginCoords,
   userHeadingDeg,
@@ -609,14 +611,8 @@ export default function PublicNavigationMap({
         {/* Hospital Building Pins */}
         {buildings.map((building) => {
           const isTarget = targetBuilding?.id === building.id;
-          const badge = classifyBuilding(building);
-          const pinColor = isTarget
-            ? "#BE123C"
-            : badge.badgeStyle.text === "#BE123C"
-            ? "#E11D48"
-            : badge.badgeStyle.text === "#1D4ED8"
-            ? "#2563EB"
-            : "#0F766E";
+          const badge = classifyBuilding(building, categories);
+          const pinColor = isTarget ? "#BE123C" : badge.accentColor || "#0F766E";
           const icon = isTarget
             ? targetIcon
             : createPinIcon(pinColor, 26, false);
@@ -976,7 +972,21 @@ export default function PublicNavigationMap({
               </button>
             </div>
             <div className="grid grid-cols-1 gap-1.5">
-              <span className="flex items-center gap-2">
+              {categories
+                .filter((c) => c.show_in_legend)
+                .map((cat) => (
+                  <span
+                    key={`legend-2d-${cat.id}`}
+                    className="flex items-center gap-2"
+                  >
+                    <span
+                      className="w-3 h-3 rounded-full inline-block shrink-0 border border-black/10"
+                      style={{ backgroundColor: cat.color_hex }}
+                    />
+                    <span className="truncate">{cat.name}</span>
+                  </span>
+                ))}
+              <span className="flex items-center gap-2 pt-1 border-t border-slate-100">
                 <span
                   className={`w-3 h-3 rounded-full inline-block shrink-0 ${
                     mockGpsEnabled ? "bg-amber-500" : "bg-[#0F766E]"

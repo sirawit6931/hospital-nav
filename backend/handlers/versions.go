@@ -160,18 +160,28 @@ func CloneMapVersion(c *gin.Context) {
 		}
 
 		for _, n := range srcNodes {
+			imgJSON := string(n.ImageURLs)
+			if strings.TrimSpace(imgJSON) == "" || strings.TrimSpace(imgJSON) == "null" {
+				imgJSON = "[]"
+			}
 			var newNodeID uint
 			if err := tx.Raw(`
-				INSERT INTO map_nodes (version_id, name, is_building, keywords, indoor_guide, image_url, lat, lng, geom)
-				VALUES (?, ?, ?, ?, ?, ?, ?, ?, ST_SetSRID(ST_MakePoint(?, ?), 4326))
+				INSERT INTO map_nodes (version_id, name, is_building, building_code, badge_label, floor_range, service_status, category_id, keywords, indoor_guide, image_url, image_urls, lat, lng, geom)
+				VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?::jsonb, ?, ?, ST_SetSRID(ST_MakePoint(?, ?), 4326))
 				RETURNING id
 			`,
 				createdVersion.ID,
 				n.Name,
 				n.IsBuilding,
+				n.BuildingCode,
+				n.BadgeLabel,
+				n.FloorRange,
+				n.ServiceStatus,
+				n.CategoryID,
 				n.Keywords,
 				n.IndoorGuide,
 				n.ImageURL,
+				imgJSON,
 				n.Lat,
 				n.Lng,
 				n.Lng,

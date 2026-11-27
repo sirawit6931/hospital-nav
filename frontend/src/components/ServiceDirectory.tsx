@@ -1,104 +1,292 @@
 "use client";
 
+import { useMemo } from "react";
 import Link from "next/link";
 import {
   Accessibility,
-  ArrowRight,
-  Clock,
+  Building2,
+  Car,
   Compass,
+  Headphones,
   Hospital,
+  Info,
+  Loader2,
   Lock,
+  Navigation,
   Phone,
+  Pill,
+  RefreshCw,
   ShieldAlert,
+  type LucideIcon,
 } from "lucide-react";
+import type { MapNode, ServicePoint } from "@/lib/api";
 
-export default function ServiceDirectory() {
+interface ServiceDirectoryProps {
+  servicePoints: ServicePoint[];
+  buildings: MapNode[];
+  isLoading?: boolean;
+  error?: string | null;
+  onRetry?: () => void;
+  onNavigateToNode: (nodeId: number) => void;
+}
+
+interface ServiceTypeMeta {
+  label: string;
+  order: number;
+  icon: LucideIcon;
+  iconBg: string;
+  iconColor: string;
+  cardBg: string;
+  cardBorder: string;
+}
+
+const SERVICE_TYPE_META: Record<string, ServiceTypeMeta> = {
+  emergency: {
+    label: "เหตุฉุกเฉินและสายด่วน",
+    order: 1,
+    icon: ShieldAlert,
+    iconBg: "bg-[#FFE4E6]",
+    iconColor: "text-[#BE123C]",
+    cardBg: "bg-[#FFE4E6]/50",
+    cardBorder: "border-rose-200",
+  },
+  info: {
+    label: "ประชาสัมพันธ์และสอบถามข้อมูล",
+    order: 2,
+    icon: Headphones,
+    iconBg: "bg-teal-50",
+    iconColor: "text-[#0F766E]",
+    cardBg: "bg-slate-50",
+    cardBorder: "border-slate-200",
+  },
+  opd: {
+    label: "จุดคัดกรองและผู้ป่วยนอก (OPD)",
+    order: 3,
+    icon: Hospital,
+    iconBg: "bg-[#DBEAFE]",
+    iconColor: "text-[#1D4ED8]",
+    cardBg: "bg-slate-50",
+    cardBorder: "border-slate-200",
+  },
+  wheelchair: {
+    label: "บริการรถเข็นและผู้สูงอายุ",
+    order: 4,
+    icon: Accessibility,
+    iconBg: "bg-[#CCFBF1]",
+    iconColor: "text-[#047857]",
+    cardBg: "bg-slate-50",
+    cardBorder: "border-slate-200",
+  },
+  pharmacy: {
+    label: "ห้องยาและการเงิน",
+    order: 5,
+    icon: Pill,
+    iconBg: "bg-indigo-50",
+    iconColor: "text-indigo-700",
+    cardBg: "bg-slate-50",
+    cardBorder: "border-slate-200",
+  },
+  parking: {
+    label: "ลานจอดรถและจุดรับ-ส่ง",
+    order: 6,
+    icon: Car,
+    iconBg: "bg-amber-50",
+    iconColor: "text-amber-700",
+    cardBg: "bg-slate-50",
+    cardBorder: "border-slate-200",
+  },
+  other: {
+    label: "จุดอำนวยความสะดวกอื่น ๆ",
+    order: 99,
+    icon: Info,
+    iconBg: "bg-slate-100",
+    iconColor: "text-slate-700",
+    cardBg: "bg-slate-50",
+    cardBorder: "border-slate-200",
+  },
+};
+
+function getServiceTypeMeta(typeKey: string): ServiceTypeMeta {
+  const key = (typeKey || "other").toLowerCase().trim();
+  return (
+    SERVICE_TYPE_META[key] || {
+      ...SERVICE_TYPE_META.other,
+      label: typeKey || SERVICE_TYPE_META.other.label,
+    }
+  );
+}
+
+function sanitizeTelHref(phone: string): string {
+  return phone.replace(/[^0-9+*#]/g, "");
+}
+
+export default function ServiceDirectory({
+  servicePoints,
+  buildings,
+  isLoading = false,
+  error = null,
+  onRetry,
+  onNavigateToNode,
+}: ServiceDirectoryProps) {
+  const buildingNameById = useMemo(() => {
+    const map = new Map<number, string>();
+    for (const b of buildings) {
+      map.set(b.id, b.name);
+    }
+    return map;
+  }, [buildings]);
+
+  const groupedServices = useMemo(() => {
+    const active = servicePoints.filter((s) => s.is_active !== false);
+    const groups = new Map<string, ServicePoint[]>();
+    for (const item of active) {
+      const key = (item.type || "other").toLowerCase().trim() || "other";
+      const list = groups.get(key) ?? [];
+      list.push(item);
+      groups.set(key, list);
+    }
+
+    return Array.from(groups.entries())
+      .map(([typeKey, items]) => ({
+        typeKey,
+        meta: getServiceTypeMeta(typeKey),
+        items,
+      }))
+      .sort((a, b) => a.meta.order - b.meta.order);
+  }, [servicePoints]);
+
   return (
     <div className="space-y-4">
-      <div className="rounded-2xl bg-white border border-slate-200 p-4 space-y-3">
-        <div className="flex items-center gap-2.5">
-          <div className="w-10 h-10 rounded-xl bg-[#FFE4E6] text-[#BE123C] flex items-center justify-center shrink-0">
-            <ShieldAlert className="w-5 h-5" />
-          </div>
-          <div>
-            <h2 className="font-heading text-base font-bold text-[#0F172A]">
-              หมายเลขติดต่อฉุกเฉินและประชาสัมพันธ์
-            </h2>
-            <p className="text-xs text-slate-500">
-              โรงพยาบาลสกลนคร • บริการข้อมูลผู้ป่วยและญาติ
-            </p>
+      {isLoading ? (
+        <div className="rounded-2xl bg-white border border-slate-200 p-8 flex flex-col items-center justify-center gap-2 text-slate-500">
+          <Loader2 className="w-6 h-6 animate-spin text-[#0F766E]" />
+          <span className="text-sm">กำลังโหลดข้อมูลจุดบริการ...</span>
+        </div>
+      ) : error ? (
+        <div className="rounded-2xl bg-rose-50 border border-rose-200 p-4 flex items-start gap-3">
+          <ShieldAlert className="w-5 h-5 text-[#BE123C] shrink-0 mt-0.5" />
+          <div className="space-y-2">
+            <p className="text-sm font-semibold text-[#BE123C]">{error}</p>
+            {onRetry && (
+              <button
+                type="button"
+                onClick={onRetry}
+                className="min-h-[40px] px-3.5 rounded-lg bg-white border border-rose-200 text-xs font-bold text-[#BE123C] inline-flex items-center gap-1.5 cursor-pointer"
+              >
+                <RefreshCw className="w-3.5 h-3.5" />
+                <span>ลองโหลดใหม่</span>
+              </button>
+            )}
           </div>
         </div>
+      ) : groupedServices.length === 0 ? (
+        <div className="rounded-2xl bg-white border border-slate-200 p-6 text-center space-y-1.5">
+          <p className="font-heading text-sm font-bold text-slate-800">
+            ยังไม่มีข้อมูลจุดบริการในระบบ
+          </p>
+          <p className="text-xs text-slate-500">
+            เจ้าหน้าที่สามารถเพิ่มจุดบริการและหมายเลขโทรศัพท์ได้จากระบบหลังบ้าน
+          </p>
+        </div>
+      ) : (
+        groupedServices.map(({ typeKey, meta, items }) => {
+          const GroupIcon = meta.icon;
+          const isEmergency = typeKey === "emergency";
 
-        <div className="grid grid-cols-1 gap-2.5 pt-1">
-          <a
-            href="tel:1669"
-            className="min-h-[48px] px-4 py-3 rounded-xl bg-[#FFE4E6]/70 border border-rose-200 hover:bg-[#FFE4E6] flex items-center justify-between gap-3 transition-colors"
-          >
-            <div className="flex items-center gap-3">
-              <Phone className="w-5 h-5 text-[#BE123C]" />
-              <div>
-                <p className="text-sm font-bold text-[#BE123C]">
-                  สายด่วนเจ็บป่วยฉุกเฉิน 1669
-                </p>
-                <p className="text-xs text-rose-800/80">
-                  ให้บริการตลอด 24 ชั่วโมง
-                </p>
+          return (
+            <section
+              key={typeKey}
+              className="rounded-2xl bg-white border border-slate-200 p-4 space-y-3"
+            >
+              <div className="flex items-center gap-2.5">
+                <div
+                  className={`w-9 h-9 rounded-xl flex items-center justify-center shrink-0 ${meta.iconBg} ${meta.iconColor}`}
+                >
+                  <GroupIcon className="w-5 h-5" />
+                </div>
+                <div className="min-w-0">
+                  <h2 className="font-heading text-sm sm:text-[15px] font-bold text-[#0F172A] leading-snug">
+                    {meta.label}
+                  </h2>
+                  <p className="text-xs text-slate-500">
+                    {items.length} จุดบริการ
+                  </p>
+                </div>
               </div>
-            </div>
-            <ArrowRight className="w-4 h-4 text-[#BE123C]" />
-          </a>
 
-          <a
-            href="tel:042176000"
-            className="min-h-[48px] px-4 py-3 rounded-xl bg-slate-50 border border-slate-200 hover:bg-teal-50 hover:border-teal-200 flex items-center justify-between gap-3 transition-colors"
-          >
-            <div className="flex items-center gap-3">
-              <Phone className="w-5 h-5 text-[#0F766E]" />
-              <div>
-                <p className="text-sm font-bold text-[#0F172A]">
-                  ประชาสัมพันธ์ รพ.สกลนคร
-                </p>
-                <p className="text-xs text-slate-500">โทร. 042-176-000</p>
+              <div className="space-y-2.5">
+                {items.map((sp) => {
+                  const linkedBuildingName = sp.node_id
+                    ? buildingNameById.get(sp.node_id)
+                    : null;
+                  const telHref = sp.phone ? sanitizeTelHref(sp.phone) : "";
+
+                  return (
+                    <div
+                      key={sp.id}
+                      className={`rounded-xl border p-3.5 space-y-2.5 ${meta.cardBg} ${meta.cardBorder}`}
+                    >
+                      <div className="space-y-1">
+                        <p
+                          className={`text-sm font-bold leading-snug ${
+                            isEmergency ? "text-[#BE123C]" : "text-[#0F172A]"
+                          }`}
+                        >
+                          {sp.name}
+                        </p>
+                        {sp.description && (
+                          <p
+                            className={`text-xs leading-relaxed ${
+                              isEmergency
+                                ? "text-rose-900/85"
+                                : "text-slate-600"
+                            }`}
+                          >
+                            {sp.description}
+                          </p>
+                        )}
+                        {linkedBuildingName && (
+                          <p className="text-[11.5px] font-semibold text-[#0F766E] inline-flex items-center gap-1 pt-0.5">
+                            <Building2 className="w-3.5 h-3.5 shrink-0" />
+                            <span>ตำแหน่ง: {linkedBuildingName}</span>
+                          </p>
+                        )}
+                      </div>
+
+                      <div className="flex flex-wrap items-center gap-2 pt-0.5">
+                        {sp.node_id !== null && sp.node_id > 0 && (
+                          <button
+                            type="button"
+                            onClick={() => onNavigateToNode(sp.node_id!)}
+                            className="min-h-[40px] px-3.5 rounded-xl bg-[#0F766E] hover:bg-[#115E59] text-white text-xs font-bold inline-flex items-center gap-1.5 shadow-xs transition-colors cursor-pointer"
+                          >
+                            <Navigation className="w-3.5 h-3.5" />
+                            <span>ดูเส้นทาง / นำทาง</span>
+                          </button>
+                        )}
+
+                        {telHref && (
+                          <a
+                            href={`tel:${telHref}`}
+                            className={`min-h-[40px] px-3.5 rounded-xl border text-xs font-bold inline-flex items-center gap-1.5 transition-colors ${
+                              isEmergency
+                                ? "bg-[#BE123C] border-[#BE123C] text-white hover:bg-rose-800"
+                                : "bg-white border-slate-200 text-slate-700 hover:border-teal-300 hover:text-[#0F766E]"
+                            }`}
+                          >
+                            <Phone className="w-3.5 h-3.5" />
+                            <span>โทร {sp.phone}</span>
+                          </a>
+                        )}
+                      </div>
+                    </div>
+                  );
+                })}
               </div>
-            </div>
-            <ArrowRight className="w-4 h-4 text-[#0F766E]" />
-          </a>
-        </div>
-      </div>
-
-      <div className="rounded-2xl bg-white border border-slate-200 p-4 space-y-3">
-        <h3 className="font-heading text-sm font-bold text-[#0F172A] flex items-center gap-2">
-          <Clock className="w-4 h-4 text-[#0F766E]" />
-          <span>เวลาทำการและจุดอำนวยความสะดวก</span>
-        </h3>
-
-        <div className="space-y-2.5 text-sm">
-          <div className="rounded-xl bg-slate-50 border border-slate-100 p-3 flex items-start gap-2.5">
-            <Hospital className="w-4 h-4 text-[#1D4ED8] shrink-0 mt-0.5" />
-            <div>
-              <p className="font-bold text-[#0F172A]">
-                ห้องตรวจผู้ป่วยนอก (OPD)
-              </p>
-              <p className="text-xs text-slate-600 mt-0.5">
-                วันจันทร์ – ศุกร์ เวลา 08:30 – 16:30 น. (ยื่นบัตรตั้งแต่ 06:30 น.)
-              </p>
-            </div>
-          </div>
-
-          <div className="rounded-xl bg-slate-50 border border-slate-100 p-3 flex items-start gap-2.5">
-            <Accessibility className="w-4 h-4 text-[#047857] shrink-0 mt-0.5" />
-            <div>
-              <p className="font-bold text-[#0F172A]">
-                จุดบริการรถเข็นและผู้สูงอายุ
-              </p>
-              <p className="text-xs text-slate-600 mt-0.5">
-                สามารถติดต่อขอรับบริการรถเข็นได้ที่จุดคัดกรองหน้าอาคารผู้ป่วยนอกและตึกอุบัติเหตุฉุกเฉิน
-              </p>
-            </div>
-          </div>
-        </div>
-      </div>
+            </section>
+          );
+        })
+      )}
 
       <div className="rounded-2xl bg-white border border-slate-200 p-4 space-y-2.5">
         <h3 className="font-heading text-sm font-bold text-[#0F172A] flex items-center gap-2">

@@ -60,7 +60,7 @@ const LEVEL_STYLES: Record<string, { label: string; cls: string }> = {
 };
 
 export default function AdminSettingsPage() {
-  const [activeTab, setActiveTab] = useState<SettingsTab>("categories");
+  const [activeTab, setActiveTab] = useState<SettingsTab>("announcements");
   const [categories, setCategories] = useState<Category[]>([]);
   const [announcements, setAnnouncements] = useState<Announcement[]>([]);
   const [nodes, setNodes] = useState<MapNode[]>([]);
@@ -306,10 +306,10 @@ export default function AdminSettingsPage() {
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
           <h1 className="font-heading text-xl font-bold text-[#0F172A]">
-            หมวดหมู่ ประกาศ QR Code และสำรองข้อมูล
+            ประกาศ QR Code และสำรองข้อมูล
           </h1>
           <p className="text-sm text-slate-500 mt-0.5">
-            ตั้งค่าหมวดหมู่สีแผนที่ แถบประกาศหน้าเว็บ สร้างป้าย QR จุดเริ่มต้น และส่งออกไฟล์สำรอง
+            จัดการแถบประกาศหน้าเว็บ สร้างป้าย QR จุดเริ่มต้น และส่งออกไฟล์สำรองข้อมูล (จัดการหมวดหมู่ได้ที่หน้า &ldquo;แก้ไขข้อมูลตึก&rdquo;)
           </p>
         </div>
 
@@ -326,18 +326,6 @@ export default function AdminSettingsPage() {
 
       {/* Tabs */}
       <div className="flex flex-wrap items-center gap-2">
-        <button
-          type="button"
-          onClick={() => setActiveTab("categories")}
-          className={`min-h-[42px] px-4 rounded-xl text-xs sm:text-sm font-bold inline-flex items-center gap-2 cursor-pointer ${
-            activeTab === "categories"
-              ? "bg-[#0F766E] text-white shadow-xs"
-              : "bg-white border border-slate-200 text-slate-700 hover:bg-slate-50"
-          }`}
-        >
-          <Palette className="w-4 h-4" />
-          <span>หมวดหมู่ & สี Legend ({categories.length})</span>
-        </button>
 
         <button
           type="button"
