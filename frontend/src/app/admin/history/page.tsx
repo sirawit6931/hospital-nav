@@ -129,11 +129,10 @@ export default function AdminHistoryPage() {
     <div className="min-h-full bg-[#F8FAFC] pb-20 md:pb-8">
       {toast && (
         <div
-          className={`fixed top-4 right-4 z-[900] max-w-sm rounded-2xl px-4 py-3 shadow-lg border flex items-center gap-2.5 text-sm font-semibold ${
-            toast.type === "success"
+          className={`fixed top-4 right-4 z-[900] max-w-sm rounded-2xl px-4 py-3 shadow-lg border flex items-center gap-2.5 text-sm font-semibold ${toast.type === "success"
               ? "bg-white border-teal-200 text-[#0F766E]"
               : "bg-rose-50 border-rose-200 text-[#BE123C]"
-          }`}
+            }`}
         >
           {toast.type === "success" ? (
             <CheckCircle2 className="w-4 h-4 shrink-0" />
@@ -151,10 +150,6 @@ export default function AdminHistoryPage() {
             <h1 className="font-heading text-xl sm:text-2xl font-bold text-[#0F172A]">
               ประวัติการแก้ไข
             </h1>
-            <p className="text-xs sm:text-sm text-slate-500 mt-0.5">
-              ติดตามทุกการเปลี่ยนแปลงของข้อมูลตึก แผนก หมวดหมู่ และแผนที่ 3D
-              พร้อมย้อนกลับค่าเดิมได้ทันที
-            </p>
           </div>
           <button
             type="button"

@@ -7,22 +7,17 @@ import {
   ChevronDown,
   ChevronUp,
   Headphones,
-  LayoutDashboard,
   Loader2,
-  LogOut,
   Map as MapIcon,
   Navigation,
   QrCode,
   Search,
   ShieldAlert,
-  ShieldCheck,
   X,
 } from "lucide-react";
-import Link from "next/link";
 import {
   api,
   extractApiError,
-  type AdminMeResponse,
   type Announcement,
   type Category,
   type MapNode,
@@ -111,10 +106,6 @@ export default function HomePage() {
   const [qrOriginNode, setQrOriginNode] = useState<MapNode | null>(null);
   const [qrBannerDismissed, setQrBannerDismissed] = useState(false);
   const [previewVersionId, setPreviewVersionId] = useState<number | null>(null);
-  const [activeAdminUser, setActiveAdminUser] = useState<{
-    id: number;
-    username: string;
-  } | null>(null);
   const hasQrStartNodeRef = useRef<boolean>(false);
   const previewVersionIdRef = useRef<number | null>(null);
 
@@ -163,9 +154,9 @@ export default function HomePage() {
   const [hasArrivedCurrentTarget, setHasArrivedCurrentTarget] = useState(false);
   const dismissedArrivalKeyRef = useRef<string | null>(null);
 
-  // Auto-reroute cooldown & concurrency guards
+  // Auto-reroute cooldown & AbortController to cancel stale /api/route requests on rapid building switches
   const lastRerouteAtRef = useRef<number>(0);
-  const isFetchingRouteRef = useRef<boolean>(false);
+  const routeAbortControllerRef = useRef<AbortController | null>(null);
 
   // Mobile Bottom Sheet expansion state when viewing route map
   const [sheetExpanded, setSheetExpanded] = useState(true);
@@ -481,18 +472,6 @@ export default function HomePage() {
     fetchPublicMetadata();
     acquireGpsLocation(false);
 
-    // Silent check if an admin session cookie is currently active (never redirects or errors on 401)
-    api
-      .get<AdminMeResponse>("/api/admin/me")
-      .then((res) => {
-        if (res.data?.admin) {
-          setActiveAdminUser(res.data.admin);
-        }
-      })
-      .catch(() => {
-        setActiveAdminUser(null);
-      });
-
     if (qrNodeId !== null) {
       api
         .get<MapNode>(`/api/nodes/${qrNodeId}`)
@@ -653,8 +632,12 @@ export default function HomePage() {
       target: MapNode,
       options?: { isAutoReroute?: boolean; startNodeId?: number | null }
     ) => {
-      if (isFetchingRouteRef.current) return;
-      isFetchingRouteRef.current = true;
+      // Cancel any in-flight /api/route request immediately so rapid building clicks never race
+      if (routeAbortControllerRef.current) {
+        routeAbortControllerRef.current.abort();
+      }
+      const controller = new AbortController();
+      routeAbortControllerRef.current = controller;
 
       if (options?.isAutoReroute) {
         setIsAutoRerouting(true);
@@ -675,9 +658,22 @@ export default function HomePage() {
         if (previewVersionIdRef.current) {
           params.preview_version_id = previewVersionIdRef.current;
         }
-        const res = await api.get<RouteResponse>("/api/route", { params });
+        const res = await api.get<RouteResponse>("/api/route", {
+          params,
+          signal: controller.signal,
+        });
+        if (controller.signal.aborted) return;
         setRouteData(res.data);
-      } catch (err) {
+      } catch (err: unknown) {
+        const maybeErr = err as { code?: string; name?: string };
+        if (
+          controller.signal.aborted ||
+          maybeErr?.code === "ERR_CANCELED" ||
+          maybeErr?.name === "CanceledError" ||
+          maybeErr?.name === "AbortError"
+        ) {
+          return;
+        }
         if (!options?.isAutoReroute) {
           setRouteData(null);
         }
@@ -688,9 +684,11 @@ export default function HomePage() {
           )
         );
       } finally {
-        isFetchingRouteRef.current = false;
-        setIsLoadingRoute(false);
-        setIsAutoRerouting(false);
+        if (routeAbortControllerRef.current === controller) {
+          routeAbortControllerRef.current = null;
+          setIsLoadingRoute(false);
+          setIsAutoRerouting(false);
+        }
       }
     },
     []
@@ -703,6 +701,9 @@ export default function HomePage() {
     fetchRoute(rawOriginCoords, targetBuilding, {
       startNodeId: originMode === "building" ? originBuildingId : null,
     });
+    return () => {
+      routeAbortControllerRef.current?.abort();
+    };
     // Intentionally triggered only when user selects a new target or switches origin mode/building
     // Live GPS movement uses Snap-to-Path & Auto-Reroute below to avoid spamming /api/route
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -989,8 +990,8 @@ export default function HomePage() {
     setIsNavigating(false);
     stopThaiNavigationSpeech();
     setMockWalkProgress(0);
+    setFocusedNode(null);
     setTargetBuilding(building);
-    setFocusedNode(building);
     setActiveTab("route");
     setSheetExpanded(true);
   }, []);
@@ -1331,6 +1332,7 @@ export default function HomePage() {
               categories={categories}
               originCoords={displayOriginCoords}
               isSelected={targetBuilding?.id === building.id}
+              searchQuery={searchInput}
               onSelectRoute={handleSelectRoute}
               onFocusOnMap={(b) => setFocusedNode(b)}
             />
@@ -1441,48 +1443,10 @@ export default function HomePage() {
       <PublicNavigationMap {...sharedMapProps} />
     );
 
-  const handlePublicAdminLogout = useCallback(async () => {
-    try {
-      await api.post("/api/admin/logout");
-    } catch {
-      // Ignore
-    }
-    setActiveAdminUser(null);
-  }, []);
-
-  const adminSessionBar = activeAdminUser ? (
-    <div className="shrink-0 bg-slate-900 text-white px-3 py-1.5 flex items-center justify-between gap-2 text-xs">
-      <div className="flex items-center gap-1.5 min-w-0">
-        <ShieldCheck className="w-3.5 h-3.5 text-teal-400 shrink-0" />
-        <span className="truncate font-semibold">
-          แอดมิน: {activeAdminUser.username}
-        </span>
-      </div>
-      <div className="flex items-center gap-1.5 shrink-0">
-        <Link
-          href="/admin"
-          className="px-2 py-0.5 rounded-md bg-teal-600 hover:bg-teal-500 text-white text-[11px] font-bold inline-flex items-center gap-1 transition-colors"
-        >
-          <LayoutDashboard className="w-3 h-3" />
-          <span>กลับหน้า Admin</span>
-        </Link>
-        <button
-          type="button"
-          onClick={handlePublicAdminLogout}
-          className="px-2 py-0.5 rounded-md bg-rose-600/90 hover:bg-rose-600 text-white text-[11px] font-bold inline-flex items-center gap-1 transition-colors cursor-pointer"
-        >
-          <LogOut className="w-3 h-3" />
-          <span>ออกจากระบบ</span>
-        </button>
-      </div>
-    </div>
-  ) : null;
-
   return (
     <div className="h-dvh w-full overflow-hidden flex flex-col md:flex-row bg-[#F8FAFC]">
       {/* ================= DESKTOP / TABLET LEFT SIDEBAR (420px) ================= */}
       <aside className="hidden md:flex md:w-[420px] md:shrink-0 h-full flex-col border-r border-slate-200 bg-[#F8FAFC]">
-        {adminSessionBar}
         {previewVersionId && (
           <div className="shrink-0 bg-amber-500 text-white px-3.5 py-2 flex items-center justify-between gap-2 text-xs font-bold">
             <span className="truncate">
@@ -1574,7 +1538,6 @@ export default function HomePage() {
         {/* Hide header & announcements during Active Navigation on Mobile for full-screen Google Maps experience */}
         {!isNavigating && (
           <>
-            {adminSessionBar}
             {previewVersionId && (
               <div className="shrink-0 bg-amber-500 text-white px-3 py-1.5 flex items-center justify-between gap-2 text-xs font-bold">
                 <span className="truncate">

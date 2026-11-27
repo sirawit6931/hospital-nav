@@ -11,8 +11,10 @@ import {
   Layers,
   Loader2,
   Map as MapIcon,
+  Orbit,
   RefreshCw,
   RotateCcw,
+  RotateCw,
   X,
 } from "lucide-react";
 import type { MapEdge, MapNode, SurveyTrack } from "@/lib/api";
@@ -25,7 +27,10 @@ import {
   type MapViewMode,
   type SakonHospital3DDataset,
 } from "@/lib/hospital3d";
-import type { AdminEditorMode } from "@/components/maps/AdminMapEditor";
+import type {
+  AdminEditorMode,
+  DraftPathPoint,
+} from "@/components/maps/AdminMapEditor";
 
 interface Admin3DMapEditorProps {
   mapViewMode: MapViewMode;
@@ -36,9 +41,19 @@ interface Admin3DMapEditorProps {
   surveys: SurveyTrack[];
   showSurveys: boolean;
   selectedSourceNodeId: number | null;
+  draftPathPoints?: DraftPathPoint[];
   overrides3D?: Map3DOverridesPayload | null;
   selectedBuilding3DId?: string | null;
   selected3D?: Building3DOverride | null;
+  isPlacingBlock3D?: boolean;
+  ghostBlockTemplate?: {
+    width_m: number;
+    depth_m: number;
+    angle_deg: number;
+    height: number;
+    color: string;
+  };
+  onCancelPlacement3D?: () => void;
   showSatelliteUnderlay?: boolean;
   buildingOpacity?: number;
   onSelectBuilding3D?: (building: Building3DProps | null) => void;
@@ -115,9 +130,13 @@ export default function Admin3DMapEditor({
   surveys,
   showSurveys,
   selectedSourceNodeId,
+  draftPathPoints = [],
   overrides3D,
   selectedBuilding3DId,
   selected3D,
+  isPlacingBlock3D = false,
+  ghostBlockTemplate,
+  onCancelPlacement3D,
   showSatelliteUnderlay = false,
   buildingOpacity = 0.92,
   onSelectBuilding3D,
@@ -144,6 +163,8 @@ export default function Admin3DMapEditor({
   );
   const [mapReady, setMapReady] = useState(false);
   const [isTilted3D, setIsTilted3D] = useState(true);
+  const [orbitMode, setOrbitMode] = useState(false);
+  const [bearingDeg, setBearingDeg] = useState(0);
   const [translucentBuildings, setTranslucentBuildings] = useState(false);
   const [controlsOpen, setControlsOpen] = useState(false);
   const [legendOpen, setLegendOpen] = useState(false);
@@ -186,6 +207,9 @@ export default function Admin3DMapEditor({
   const onBeginTransform3DRef = useRef(onBeginTransform3D);
   const onLiveTransform3DRef = useRef(onLiveTransform3D);
   const onMapCenterChangeRef = useRef(onMapCenterChange);
+  const onCancelPlacement3DRef = useRef(onCancelPlacement3D);
+  const isPlacingBlock3DRef = useRef(isPlacingBlock3D);
+  const ghostBlockTemplateRef = useRef(ghostBlockTemplate);
   const splitTrackIdRef = useRef<number | null>(splitTrackId ?? null);
   const onSplitTrackClickRef = useRef(onSplitTrackClick);
   const selected3DRef = useRef<Building3DOverride | null>(selected3D ?? null);
@@ -223,6 +247,18 @@ export default function Admin3DMapEditor({
   useEffect(() => {
     onMapCenterChangeRef.current = onMapCenterChange;
   }, [onMapCenterChange]);
+
+  useEffect(() => {
+    onCancelPlacement3DRef.current = onCancelPlacement3D;
+  }, [onCancelPlacement3D]);
+
+  useEffect(() => {
+    isPlacingBlock3DRef.current = isPlacingBlock3D;
+  }, [isPlacingBlock3D]);
+
+  useEffect(() => {
+    ghostBlockTemplateRef.current = ghostBlockTemplate;
+  }, [ghostBlockTemplate]);
 
   useEffect(() => {
     splitTrackIdRef.current = splitTrackId ?? null;
@@ -316,12 +352,15 @@ export default function Admin3DMapEditor({
       zoom: DEFAULT_3D_ZOOM,
       pitch: DEFAULT_3D_PITCH,
       bearing: DEFAULT_3D_BEARING,
-      minZoom: 16,
+      minZoom: 15.8,
       maxZoom: 20,
-      maxPitch: 68,
+      maxPitch: 75,
+      dragRotate: true,
+      pitchWithRotate: true,
+      touchPitch: true,
       maxBounds: [
-        [104.1546, 17.1602],
-        [104.1614, 17.1660],
+        [104.1490, 17.1555],
+        [104.1670, 17.1710],
       ],
       attributionControl: false,
       style: {
@@ -382,6 +421,8 @@ export default function Admin3DMapEditor({
           },
           adminEdges: { type: "geojson", data: EMPTY_FC },
           adminSurveys: { type: "geojson", data: EMPTY_FC },
+          adminDraftPath: { type: "geojson", data: EMPTY_FC },
+          ghostBlock3D: { type: "geojson", data: EMPTY_FC },
           transformGuides: { type: "geojson", data: EMPTY_FC },
         },
         layers: [
@@ -504,6 +545,32 @@ export default function Admin3DMapEditor({
               "line-opacity": 0,
             },
           },
+          // Freeform Draft Path Preview (orange live drawing line + vertex dots)
+          {
+            id: "admin-draft-path-line",
+            type: "line",
+            source: "adminDraftPath",
+            filter: ["==", ["geometry-type"], "LineString"],
+            layout: { "line-cap": "round", "line-join": "round" },
+            paint: {
+              "line-color": "#F97316",
+              "line-width": 6,
+              "line-opacity": 0.96,
+              "line-dasharray": [2, 1.2],
+            },
+          },
+          {
+            id: "admin-draft-path-points",
+            type: "circle",
+            source: "adminDraftPath",
+            filter: ["==", ["geometry-type"], "Point"],
+            paint: {
+              "circle-radius": 6.5,
+              "circle-color": "#F97316",
+              "circle-stroke-width": 2.5,
+              "circle-stroke-color": "#FFFFFF",
+            },
+          },
           // Crisp architectural footprint outlines & stylized 3D trees
           {
             id: "buildings-outline",
@@ -575,6 +642,29 @@ export default function Admin3DMapEditor({
               "fill-extrusion-vertical-gradient": true,
             },
           },
+          // Ghost Block 3D Preview (follows cursor smoothly via direct setData during Placement Mode)
+          {
+            id: "ghost-block-3d-extrusion",
+            type: "fill-extrusion",
+            source: "ghostBlock3D",
+            paint: {
+              "fill-extrusion-color": ["coalesce", ["get", "color"], "#0EA5E9"],
+              "fill-extrusion-height": ["coalesce", ["get", "height"], 14],
+              "fill-extrusion-base": 0,
+              "fill-extrusion-opacity": 0.48,
+              "fill-extrusion-vertical-gradient": true,
+            },
+          },
+          {
+            id: "ghost-block-3d-outline",
+            type: "line",
+            source: "ghostBlock3D",
+            paint: {
+              "line-color": "#0284C7",
+              "line-width": 2.5,
+              "line-dasharray": [2, 1.2],
+            },
+          },
           // Rotate stem / transform guide line for Mode 6 selected building
           {
             id: "transform-guides-line",
@@ -625,6 +715,13 @@ export default function Admin3DMapEditor({
     map.on("moveend", () => {
       const c = map.getCenter();
       onMapCenterChangeRef.current?.(c.lat, c.lng);
+      const b = ((Math.round(map.getBearing()) % 360) + 360) % 360;
+      setBearingDeg(b);
+    });
+
+    map.on("rotate", () => {
+      const b = ((Math.round(map.getBearing()) % 360) + 360) % 360;
+      setBearingDeg(b);
     });
 
     map.on("mouseenter", "admin-edges-hitbox", () => {
@@ -654,16 +751,22 @@ export default function Admin3DMapEditor({
     for (const bLayer of ["buildings-3d-solid", "buildings-3d-translucent"]) {
       map.on("mouseenter", bLayer, () => {
         if (modeRef.current === "customize_3d") {
-          map.getCanvas().style.cursor = "pointer";
+          map.getCanvas().style.cursor = isPlacingBlock3DRef.current
+            ? "crosshair"
+            : "pointer";
         }
       });
       map.on("mouseleave", bLayer, () => {
         if (modeRef.current === "customize_3d") {
-          map.getCanvas().style.cursor = "crosshair";
+          map.getCanvas().style.cursor = isPlacingBlock3DRef.current
+            ? "crosshair"
+            : "";
         }
       });
       map.on("click", bLayer, (e) => {
         if (modeRef.current !== "customize_3d") return;
+        // During Placement Mode, let the map click handler place the new block here instead of selecting an existing building
+        if (isPlacingBlock3DRef.current) return;
         const feat = e.features?.[0];
         if (!feat) return;
         const bId = feat.properties?.id ? String(feat.properties.id) : null;
@@ -675,6 +778,62 @@ export default function Admin3DMapEditor({
       });
     }
 
+    // Ghost 3D Block Preview follows cursor in real time via direct GeoJSONSource.setData (zero React re-render)
+    map.on("mousemove", (e) => {
+      if (modeRef.current !== "customize_3d" || !isPlacingBlock3DRef.current) {
+        return;
+      }
+      const ghostSrc = map.getSource("ghostBlock3D") as
+        | maplibregl.GeoJSONSource
+        | undefined;
+      if (!ghostSrc) return;
+
+      const tpl = ghostBlockTemplateRef.current ?? {
+        width_m: 24,
+        depth_m: 18,
+        angle_deg: -24,
+        height: 14,
+        color: "#0EA5E9",
+      };
+      const hw = tpl.width_m / 2;
+      const hd = tpl.depth_m / 2;
+      const lat = e.lngLat.lat;
+      const lng = e.lngLat.lng;
+      const c1 = localOffsetToLngLat(lat, lng, tpl.angle_deg, -hw, -hd);
+      const c2 = localOffsetToLngLat(lat, lng, tpl.angle_deg, hw, -hd);
+      const c3 = localOffsetToLngLat(lat, lng, tpl.angle_deg, hw, hd);
+      const c4 = localOffsetToLngLat(lat, lng, tpl.angle_deg, -hw, hd);
+
+      ghostSrc.setData({
+        type: "FeatureCollection",
+        features: [
+          {
+            type: "Feature",
+            properties: {
+              height: tpl.height,
+              color: tpl.color,
+            },
+            geometry: {
+              type: "Polygon",
+              coordinates: [[c1, c2, c3, c4, c1]],
+            },
+          },
+        ],
+      });
+    });
+
+    // Right-click cancels Placement Mode immediately
+    map.on("contextmenu", (e) => {
+      if (modeRef.current === "customize_3d" && isPlacingBlock3DRef.current) {
+        e.preventDefault();
+        const ghostSrc = map.getSource("ghostBlock3D") as
+          | maplibregl.GeoJSONSource
+          | undefined;
+        ghostSrc?.setData(EMPTY_FC);
+        onCancelPlacement3DRef.current?.();
+      }
+    });
+
     map.on("click", (e) => {
       if (splitTrackIdRef.current !== null) {
         onSplitTrackClickRef.current?.(
@@ -684,11 +843,19 @@ export default function Admin3DMapEditor({
         );
         return;
       }
-      if (modeRef.current === "add_node") {
+      if (modeRef.current === "add_node" || modeRef.current === "draw_path") {
         onMapClickRef.current(e.lngLat.lat, e.lngLat.lng);
         return;
       }
       if (modeRef.current === "customize_3d") {
+        if (isPlacingBlock3DRef.current) {
+          const ghostSrc = map.getSource("ghostBlock3D") as
+            | maplibregl.GeoJSONSource
+            | undefined;
+          ghostSrc?.setData(EMPTY_FC);
+          onMapClickRef.current(e.lngLat.lat, e.lngLat.lng);
+          return;
+        }
         const hits = map.queryRenderedFeatures(e.point, {
           layers: ["buildings-3d-solid", "buildings-3d-translucent"],
         });
@@ -753,8 +920,132 @@ export default function Admin3DMapEditor({
     }
   }, [mode, showSatelliteUnderlay, buildingOpacity, mapReady]);
 
+  // Desktop 360° Orbit Mode (Left-click drag when orbitMode is ON, or Middle-click / Shift+Left drag anytime) + Q/E keys
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !mapReady) return;
+    const canvas = map.getCanvas();
+
+    if (orbitMode) {
+      map.dragPan.disable();
+      canvas.style.cursor = "grab";
+    } else {
+      map.dragPan.enable();
+      if (
+        !(mode === "customize_3d" && isPlacingBlock3D) &&
+        mode !== "add_node" &&
+        mode !== "draw_path"
+      ) {
+        canvas.style.cursor = "";
+      }
+    }
+
+    let dragging = false;
+    let lastX = 0;
+    let lastY = 0;
+
+    const onPointerDown = (e: PointerEvent) => {
+      const isLeftOrbit = orbitMode && e.button === 0;
+      const isMiddleOrShift = e.button === 1 || (e.button === 0 && e.shiftKey);
+      if (!isLeftOrbit && !isMiddleOrShift) return;
+
+      dragging = true;
+      lastX = e.clientX;
+      lastY = e.clientY;
+      map.stop();
+      map.dragPan.disable();
+      canvas.style.cursor = "grabbing";
+      e.preventDefault();
+    };
+
+    const onPointerMove = (e: PointerEvent) => {
+      if (!dragging) return;
+      const dx = e.clientX - lastX;
+      const dy = e.clientY - lastY;
+      lastX = e.clientX;
+      lastY = e.clientY;
+      const nextBearing = map.getBearing() + dx * 0.45;
+      const nextPitch = Math.max(0, Math.min(75, map.getPitch() - dy * 0.35));
+      map.jumpTo({ bearing: nextBearing, pitch: nextPitch });
+    };
+
+    const onPointerUp = () => {
+      if (!dragging) return;
+      dragging = false;
+      if (!orbitMode) {
+        map.dragPan.enable();
+        canvas.style.cursor = "";
+      } else {
+        canvas.style.cursor = "grab";
+      }
+    };
+
+    const onKeyDown = (e: KeyboardEvent) => {
+      const tag = (e.target as HTMLElement | null)?.tagName;
+      if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return;
+      if (e.key === "q" || e.key === "Q") {
+        map.stop();
+        map.easeTo({ bearing: map.getBearing() - 30, duration: 280, essential: true });
+      } else if (e.key === "e" || e.key === "E") {
+        map.stop();
+        map.easeTo({ bearing: map.getBearing() + 30, duration: 280, essential: true });
+      }
+    };
+
+    canvas.addEventListener("pointerdown", onPointerDown);
+    window.addEventListener("pointermove", onPointerMove);
+    window.addEventListener("pointerup", onPointerUp);
+    window.addEventListener("pointercancel", onPointerUp);
+    window.addEventListener("keydown", onKeyDown);
+
+    return () => {
+      canvas.removeEventListener("pointerdown", onPointerDown);
+      window.removeEventListener("pointermove", onPointerMove);
+      window.removeEventListener("pointerup", onPointerUp);
+      window.removeEventListener("pointercancel", onPointerUp);
+      window.removeEventListener("keydown", onKeyDown);
+      map.dragPan.enable();
+    };
+  }, [orbitMode, mode, isPlacingBlock3D, mapReady]);
+
+  const handleStepRotate = useCallback((deltaDeg: number) => {
+    const map = mapRef.current;
+    if (!map) return;
+    map.stop();
+    map.easeTo({
+      bearing: map.getBearing() + deltaDeg,
+      duration: 320,
+      essential: true,
+    });
+  }, []);
+
+  // Clear Ghost Preview & sync cursor whenever Placement Mode or editor mode changes
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !mapReady) return;
+
+    const canvas = map.getCanvas();
+    if (
+      (mode === "customize_3d" && isPlacingBlock3D) ||
+      mode === "add_node" ||
+      mode === "draw_path"
+    ) {
+      canvas.style.cursor = "crosshair";
+    } else {
+      canvas.style.cursor = "";
+    }
+
+    if (!isPlacingBlock3D || mode !== "customize_3d") {
+      const ghostSrc = map.getSource("ghostBlock3D") as
+        | maplibregl.GeoJSONSource
+        | undefined;
+      ghostSrc?.setData(EMPTY_FC);
+    }
+  }, [mode, isPlacingBlock3D, mapReady]);
+
   // Interactive 3D Transform Handles (Move + 4 Edge Resize + Rotate) in Mode 6
-  const selectedIdForHandles = mode === "customize_3d" ? selected3D?.id ?? null : null;
+  const selectedIdForHandles =
+    mode === "customize_3d" && !isPlacingBlock3D ? selected3D?.id ?? null : null;
 
   useEffect(() => {
     const map = mapRef.current;
@@ -789,6 +1080,7 @@ export default function Admin3DMapEditor({
 
       map.dragPan.disable();
       map.dragRotate.disable();
+      map.doubleClickZoom.disable();
       onBeginTransform3DRef.current?.();
 
       const handleMove = (moveEv: PointerEvent) => {
@@ -805,13 +1097,16 @@ export default function Admin3DMapEditor({
         window.removeEventListener("pointermove", handleMove);
         window.removeEventListener("pointerup", handleUp);
         window.removeEventListener("pointercancel", handleUp);
+        window.removeEventListener("blur", handleUp);
         map.dragPan.enable();
         map.dragRotate.enable();
+        map.doubleClickZoom.enable();
       };
 
       window.addEventListener("pointermove", handleMove, { passive: false });
       window.addEventListener("pointerup", handleUp);
       window.addEventListener("pointercancel", handleUp);
+      window.addEventListener("blur", handleUp);
     };
 
     const createHandleMarker = (
@@ -828,6 +1123,8 @@ export default function Admin3DMapEditor({
       el.className = "flex items-center justify-center select-none";
       el.innerHTML = html;
       el.addEventListener("pointerdown", (ev) => startPointerDrag(ev, onDrag));
+      el.addEventListener("mousedown", (ev) => ev.stopPropagation());
+      el.addEventListener("mouseup", (ev) => ev.stopPropagation());
       el.addEventListener("click", (ev) => ev.stopPropagation());
       const marker = new maplibregl.Marker({ element: el, anchor: "center" })
         .setLngLat([
@@ -1177,6 +1474,44 @@ export default function Admin3DMapEditor({
     src.setData({ type: "FeatureCollection", features });
   }, [surveys, showSurveys, splitTrackId, mapReady]);
 
+  // Sync Freeform Draft Path Preview (Mode: draw_path)
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !mapReady) return;
+    const src = map.getSource("adminDraftPath") as
+      | maplibregl.GeoJSONSource
+      | undefined;
+    if (!src) return;
+
+    if (!draftPathPoints || draftPathPoints.length === 0) {
+      src.setData(EMPTY_FC);
+      return;
+    }
+
+    const features: GeoJSON.Feature[] = [];
+    if (draftPathPoints.length >= 2) {
+      features.push({
+        type: "Feature",
+        properties: { kind: "line" },
+        geometry: {
+          type: "LineString",
+          coordinates: draftPathPoints.map((p) => [p.lng, p.lat]),
+        },
+      });
+    }
+    draftPathPoints.forEach((p, idx) => {
+      features.push({
+        type: "Feature",
+        properties: { index: idx + 1 },
+        geometry: {
+          type: "Point",
+          coordinates: [p.lng, p.lat],
+        },
+      });
+    });
+    src.setData({ type: "FeatureCollection", features });
+  }, [draftPathPoints, mapReady]);
+
   // Sync Interactive Admin Node Markers (clickable in all modes!)
   useEffect(() => {
     const map = mapRef.current;
@@ -1459,20 +1794,60 @@ export default function Admin3DMapEditor({
           </div>
         )}
 
-        <button
-          type="button"
-          onClick={() => setLegendOpen((prev) => !prev)}
-          title="คำอธิบายสี"
-          aria-expanded={legendOpen}
-          className={`h-9 px-3 rounded-xl border shadow-md text-xs font-semibold inline-flex items-center gap-1.5 transition-colors cursor-pointer ${
-            legendOpen
-              ? "bg-[#0F766E] border-[#0F766E] text-white"
-              : "bg-white/95 backdrop-blur border-slate-200 text-slate-700 hover:bg-slate-50"
-          }`}
-        >
-          <Info className="w-3.5 h-3.5" />
-          <span>คำอธิบายสี</span>
-        </button>
+        <div className="flex items-center gap-2">
+          <button
+            type="button"
+            onClick={() => setLegendOpen((prev) => !prev)}
+            title="คำอธิบายสี"
+            aria-expanded={legendOpen}
+            className={`h-9 px-3 rounded-xl border shadow-md text-xs font-semibold inline-flex items-center gap-1.5 transition-colors cursor-pointer ${
+              legendOpen
+                ? "bg-[#0F766E] border-[#0F766E] text-white"
+                : "bg-white/95 backdrop-blur border-slate-200 text-slate-700 hover:bg-slate-50"
+            }`}
+          >
+            <Info className="w-3.5 h-3.5" />
+            <span>คำอธิบายสี</span>
+          </button>
+
+          {/* Desktop 360° Free Orbit Controls */}
+          <div className="hidden sm:inline-flex items-center rounded-xl bg-white/95 backdrop-blur border border-slate-200 shadow-md p-0.5 gap-0.5">
+            <button
+              type="button"
+              onClick={() => handleStepRotate(-45)}
+              title="หมุนซ้าย 45° (คีย์ Q)"
+              aria-label="หมุนซ้าย 45 องศา"
+              className="w-8 h-8 rounded-lg hover:bg-slate-100 text-slate-700 flex items-center justify-center cursor-pointer"
+            >
+              <RotateCcw className="w-3.5 h-3.5" />
+            </button>
+            <button
+              type="button"
+              onClick={() => setOrbitMode((prev) => !prev)}
+              title="เปิดโหมดลากคลิกซ้ายเพื่อหมุนรอบ 360° และเอียงมุมมอง (หรือคลิกขวา/Shift+ลากได้ตลอด)"
+              className={`h-8 px-2.5 rounded-lg text-xs font-bold inline-flex items-center gap-1.5 transition-colors cursor-pointer ${
+                orbitMode
+                  ? "bg-[#0F766E] text-white"
+                  : "text-slate-700 hover:bg-slate-100"
+              }`}
+            >
+              <Orbit className="w-3.5 h-3.5" />
+              <span>หมุน 360°</span>
+              <span className="tabular-nums opacity-80 text-[11px]">
+                {bearingDeg}°
+              </span>
+            </button>
+            <button
+              type="button"
+              onClick={() => handleStepRotate(45)}
+              title="หมุนขวา 45° (คีย์ E)"
+              aria-label="หมุนขวา 45 องศา"
+              className="w-8 h-8 rounded-lg hover:bg-slate-100 text-slate-700 flex items-center justify-center cursor-pointer"
+            >
+              <RotateCw className="w-3.5 h-3.5" />
+            </button>
+          </div>
+        </div>
       </div>
     </div>
   );

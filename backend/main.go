@@ -147,6 +147,7 @@ func main() {
 			admin.POST("/map-versions/:id/clone", handlers.CloneMapVersion)
 			admin.PUT("/map-versions/:id", handlers.UpdateMapVersion)
 			admin.POST("/map-versions/:id/publish", handlers.PublishMapVersion)
+			admin.POST("/map-versions/:id/clear-paths", handlers.ClearVersionPaths)
 			admin.DELETE("/map-versions/:id", handlers.DeleteMapVersion)
 
 			// Map Nodes

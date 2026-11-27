@@ -1,14 +1,17 @@
 "use client";
 
+import { useMemo, useState } from "react";
 import {
   Building2,
   CheckCircle2,
+  ChevronLeft,
+  ChevronRight,
   Info,
   MapPin,
   Search,
   X,
 } from "lucide-react";
-import type { Category, MapNode } from "@/lib/api";
+import { getBuildingImages, type Category, type MapNode } from "@/lib/api";
 import { classifyBuilding } from "@/lib/hospital";
 
 interface ArrivalModalProps {
@@ -26,7 +29,9 @@ export default function ArrivalModal({
   onClose,
   onSearchAnother,
 }: ArrivalModalProps) {
+  const [photoIdx, setPhotoIdx] = useState(0);
   const badge = classifyBuilding(building, categories);
+  const images = useMemo(() => getBuildingImages(building), [building]);
 
   return (
     <div
@@ -87,15 +92,70 @@ export default function ArrivalModal({
             </span>
           </div>
 
-          {/* Building Photo (image_url) */}
-          {building.image_url ? (
-            <div className="overflow-hidden rounded-2xl border border-slate-200 bg-slate-100">
-              {/* eslint-disable-next-line @next/next/no-img-element */}
-              <img
-                src={building.image_url}
-                alt={`ภาพด้านหน้า ${building.name}`}
-                className="w-full h-48 object-cover"
-              />
+          {/* Building Multi-Photo Gallery (image_urls) */}
+          {images.length > 0 ? (
+            <div className="space-y-2">
+              <div className="relative overflow-hidden rounded-2xl border border-slate-200 bg-slate-100">
+                {/* eslint-disable-next-line @next/next/no-img-element */}
+                <img
+                  src={images[photoIdx] || images[0]}
+                  alt={`ภาพด้านหน้า ${building.name}`}
+                  className="w-full h-48 object-cover"
+                />
+                {images.length > 1 && (
+                  <>
+                    <span className="absolute top-2 left-2 px-2 py-0.5 rounded-full bg-slate-900/75 text-white text-[11px] font-bold">
+                      {photoIdx + 1} / {images.length}
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setPhotoIdx((prev) =>
+                          prev === 0 ? images.length - 1 : prev - 1
+                        )
+                      }
+                      aria-label="รูปก่อนหน้า"
+                      className="w-8 h-8 rounded-full bg-white/90 hover:bg-white text-slate-800 shadow absolute left-2 top-1/2 -translate-y-1/2 flex items-center justify-center cursor-pointer"
+                    >
+                      <ChevronLeft className="w-4 h-4" />
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setPhotoIdx((prev) =>
+                          prev === images.length - 1 ? 0 : prev + 1
+                        )
+                      }
+                      aria-label="รูปถัดไป"
+                      className="w-8 h-8 rounded-full bg-white/90 hover:bg-white text-slate-800 shadow absolute right-2 top-1/2 -translate-y-1/2 flex items-center justify-center cursor-pointer"
+                    >
+                      <ChevronRight className="w-4 h-4" />
+                    </button>
+                  </>
+                )}
+              </div>
+              {images.length > 1 && (
+                <div className="flex items-center gap-1.5 overflow-x-auto pb-0.5">
+                  {images.map((url, idx) => (
+                    <button
+                      key={`arr-img-${idx}`}
+                      type="button"
+                      onClick={() => setPhotoIdx(idx)}
+                      className={`w-14 h-10 rounded-lg overflow-hidden border-2 shrink-0 cursor-pointer ${idx === photoIdx
+                          ? "border-[#0F766E]"
+                          : "border-slate-200 opacity-70 hover:opacity-100"
+                        }`}
+                    >
+                      {/* eslint-disable-next-line @next/next/no-img-element */}
+                      <img
+                        src={url}
+                        alt={`รูปที่ ${idx + 1}`}
+                        className="w-full h-full object-cover"
+                      />
+                    </button>
+                  ))}
+                </div>
+              )}
             </div>
           ) : (
             <div className="rounded-2xl border border-dashed border-slate-200 bg-slate-50 p-4 flex items-center gap-3 text-slate-500">

@@ -1,10 +1,12 @@
-import type { MapNode } from "./api";
+import type { Department, MapNode } from "./api";
 
 export interface SearchSuggestion {
   id: string;
   building: MapNode;
   primaryText: string;
   secondaryText: string;
+  matchedRoom?: string;
+  matchedFloor?: string;
   matchType: "building" | "keyword" | "floor" | "fuzzy";
   score: number;
 }
@@ -13,19 +15,52 @@ export interface RankedBuildingMatch {
   building: MapNode;
   score: number;
   matchedHint?: string;
+  matchedRoom?: string;
+  matchedFloor?: string;
 }
 
 /**
- * Strips Thai tone marks (่ ้ ๊ ๋ ์) and normalizes whitespace/case so typos like
- * "ร่มเยน" match "ตึกร่มเย็น" and "เอ็กซเรย" match "เอ็กซ์เรย์".
+ * Strips Thai tone marks (่ ้ ๊ ๋ ์) and ไม้ไต่คู้ (็) and normalizes whitespace/case so
+ * "ร่มเยน" matches "ตึกร่มเย็น" and "เอกซเรย์" matches "เอ็กซ์เรย์" or "[ห้องเอกซเรย์]".
  */
 export function normalizeSearchText(input: string): string {
   return input
     .toLowerCase()
-    .replace(/[\u0E48-\u0E4C]/g, "")
-    .replace(/[-_/().,•]+/g, " ")
+    .replace(/[\u0E47-\u0E4C]/g, "")
+    .replace(/[-_/().,•\[\]]+/g, " ")
     .replace(/\s+/g, " ")
     .trim();
+}
+
+/**
+ * Finds structured departments/rooms inside a building matching a partial query.
+ */
+export function findMatchingDepartments(
+  building: MapNode,
+  query: string
+): Department[] {
+  const rawQuery = query.toLowerCase().trim();
+  const normQuery = normalizeSearchText(query);
+  if (!normQuery) return [];
+
+  const depts = building.departments ?? [];
+  const matches: { dept: Department; score: number }[] = [];
+
+  for (const dept of depts) {
+    const nameScore = scoreTermMatch(rawQuery, normQuery, dept.name);
+    const combinedScore = scoreTermMatch(
+      rawQuery,
+      normQuery,
+      `${dept.name} ${dept.floor} ${dept.keywords}`
+    );
+    const best = Math.max(nameScore, combinedScore);
+    if (best >= 52) {
+      matches.push({ dept, score: best });
+    }
+  }
+
+  matches.sort((a, b) => b.score - a.score);
+  return matches.map((m) => m.dept);
 }
 
 function getBigrams(str: string): Set<string> {
@@ -149,6 +184,8 @@ export function rankBuildingsByQuery(
   for (const building of buildings) {
     let bestScore = scoreTermMatch(rawQuery, normQuery, building.name);
     let matchedHint: string | undefined;
+    let matchedRoom: string | undefined;
+    let matchedFloor: string | undefined;
 
     // Check structured departments attached from /api/buildings
     const depts = building.departments || [];
@@ -158,8 +195,12 @@ export function rankBuildingsByQuery(
       if (deptNameScore > bestScore) {
         bestScore = deptNameScore;
         matchedHint = deptLabel;
-      } else if (!matchedHint && deptNameScore >= 58) {
+        matchedRoom = dept.name;
+        matchedFloor = dept.floor || undefined;
+      } else if (!matchedRoom && deptNameScore >= 52) {
         matchedHint = deptLabel;
+        matchedRoom = dept.name;
+        matchedFloor = dept.floor || undefined;
       }
 
       const deptKeywords = (dept.keywords || "")
@@ -171,8 +212,12 @@ export function rankBuildingsByQuery(
         if (s > bestScore) {
           bestScore = s;
           matchedHint = deptLabel;
-        } else if (!matchedHint && s >= 60) {
+          matchedRoom = dept.name;
+          matchedFloor = dept.floor || undefined;
+        } else if (!matchedRoom && s >= 55) {
           matchedHint = deptLabel;
+          matchedRoom = dept.name;
+          matchedFloor = dept.floor || undefined;
         }
       }
 
@@ -184,6 +229,8 @@ export function rankBuildingsByQuery(
       if (deptCombined > bestScore) {
         bestScore = deptCombined;
         matchedHint = deptLabel;
+        matchedRoom = dept.name;
+        matchedFloor = dept.floor || undefined;
       }
     }
 
@@ -233,7 +280,13 @@ export function rankBuildingsByQuery(
     }
 
     if (bestScore >= 28) {
-      ranked.push({ building, score: bestScore, matchedHint });
+      ranked.push({
+        building,
+        score: bestScore,
+        matchedHint,
+        matchedRoom,
+        matchedFloor,
+      });
     }
   }
 
@@ -273,7 +326,11 @@ export function buildSearchSuggestions(
     let primaryText = b.name;
     let secondaryText = item.matchedHint || b.keywords.split(",")[0]?.trim() || "";
 
-    if (nameScore >= 70) {
+    if (item.matchedRoom && nameScore < 85) {
+      matchType = "floor";
+      primaryText = item.matchedRoom;
+      secondaryText = b.name;
+    } else if (nameScore >= 70) {
       matchType = "building";
       primaryText = b.name;
       secondaryText = item.matchedHint
@@ -294,6 +351,8 @@ export function buildSearchSuggestions(
       building: b,
       primaryText,
       secondaryText,
+      matchedRoom: item.matchedRoom,
+      matchedFloor: item.matchedFloor,
       matchType,
       score: item.score,
     });

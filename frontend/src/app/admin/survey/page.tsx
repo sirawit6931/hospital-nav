@@ -13,6 +13,8 @@ import {
   Filter,
   FolderOpen,
   Gauge,
+  Image as ImageIcon,
+  Layers,
   Loader2,
   MapPin,
   Pause,
@@ -24,6 +26,7 @@ import {
   Smartphone,
   Sparkles,
   Square,
+  Stethoscope,
   Timer,
   Trash2,
   Undo2,
@@ -33,10 +36,11 @@ import {
 import {
   api,
   extractApiError,
+  type Category,
   type MapNode,
   type SurveyTrack,
-  type UploadResponse,
 } from "@/lib/api";
+import { uploadCompressedImages } from "@/lib/imageUpload";
 import {
   buildGpxXml,
   formatDurationClock,
@@ -125,17 +129,21 @@ export default function AdminSurveyPage() {
   const [simplifyOnSave, setSimplifyOnSave] = useState(true);
   const [isSavingTrack, setIsSavingTrack] = useState(false);
 
-  // Slide-up Sheet: Pin Building / Junction
+  // Slide-up Sheet: Pin Building / Junction (multi-photo + floor/room tag builder)
   const [pinSheetOpen, setPinSheetOpen] = useState(false);
   const [pinIsBuilding, setPinIsBuilding] = useState(true);
   const [pinName, setPinName] = useState("");
+  const [pinCategoryId, setPinCategoryId] = useState<number | null>(null);
   const [pinKeywords, setPinKeywords] = useState("");
   const [pinIndoorGuide, setPinIndoorGuide] = useState("");
-  const [pinImageUrl, setPinImageUrl] = useState("");
+  const [pinImageUrls, setPinImageUrls] = useState<string[]>([]);
+  const [pinFloors, setPinFloors] = useState<
+    { id: string; floor: string; rooms: string[]; draftRoom: string }[]
+  >([{ id: "fl-1", floor: "ชั้น 1", rooms: [], draftRoom: "" }]);
   const [draftPinCoords, setDraftPinCoords] = useState<[number, number] | null>(
     null
   );
-  const [isUploadingPhoto, setIsUploadingPhoto] = useState(false);
+  const [photoUploadText, setPhotoUploadText] = useState<string | null>(null);
   const [isPinningNode, setIsPinningNode] = useState(false);
 
   // Slide-up Sheet: Saved Trips & Buildings + GPX Import/Export
@@ -145,6 +153,7 @@ export default function AdminSurveyPage() {
   const [isImportingGpx, setIsImportingGpx] = useState(false);
 
   // Saved server lists
+  const [categories, setCategories] = useState<Category[]>([]);
   const [pinnedNodes, setPinnedNodes] = useState<MapNode[]>([]);
   const [savedSurveys, setSavedSurveys] = useState<SurveyTrack[]>([]);
   const [statusToast, setStatusToast] = useState<{
@@ -168,12 +177,14 @@ export default function AdminSurveyPage() {
 
   const loadFieldData = useCallback(async () => {
     try {
-      const [nodesRes, surveysRes] = await Promise.all([
+      const [nodesRes, surveysRes, catsRes] = await Promise.all([
         api.get<MapNode[]>("/api/admin/nodes"),
         api.get<SurveyTrack[]>("/api/admin/surveys"),
+        api.get<Category[]>("/api/admin/categories"),
       ]);
       setPinnedNodes(Array.isArray(nodesRes.data) ? nodesRes.data : []);
       setSavedSurveys(Array.isArray(surveysRes.data) ? surveysRes.data : []);
+      setCategories(Array.isArray(catsRes.data) ? catsRes.data : []);
     } catch {
       // Silent on init
     }
@@ -739,26 +750,59 @@ export default function AdminSurveyPage() {
     }
   };
 
-  const handleUploadBuildingPhoto = async (
+  const handleUploadBuildingPhotos = async (
     e: React.ChangeEvent<HTMLInputElement>
   ) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-    setIsUploadingPhoto(true);
+    const files = e.target.files;
+    if (!files || files.length === 0) return;
+    setPhotoUploadText(`กำลังย่อรูปและอัปโหลด 0/${files.length}...`);
     try {
-      const formData = new FormData();
-      formData.append("file", file);
-      const res = await api.post<UploadResponse>("/api/admin/upload", formData, {
-        headers: { "Content-Type": "multipart/form-data" },
+      const uploaded = await uploadCompressedImages(files, (done, total) => {
+        setPhotoUploadText(`กำลังย่อรูปและอัปโหลด ${done}/${total}...`);
       });
-      setPinImageUrl(res.data.image_url || res.data.url);
-      notify("success", "อัปโหลดภาพถ่ายหน้าอาคารเรียบร้อยแล้ว");
+      if (uploaded.length > 0) {
+        setPinImageUrls((prev) => Array.from(new Set([...prev, ...uploaded])));
+        notify(
+          "success",
+          `อัปโหลดภาพถ่าย ${uploaded.length} รูปเรียบร้อยแล้ว`
+        );
+      }
     } catch (err) {
       notify("error", extractApiError(err, "อัปโหลดรูปภาพไม่สำเร็จ"));
     } finally {
-      setIsUploadingPhoto(false);
+      setPhotoUploadText(null);
       e.target.value = "";
     }
+  };
+
+  const handleAddSurveyFloor = () => {
+    setPinFloors((prev) => {
+      const nextNum = prev.length + 1;
+      return [
+        ...prev,
+        {
+          id: `fl-${Date.now()}-${nextNum}`,
+          floor: `ชั้น ${nextNum}`,
+          rooms: [],
+          draftRoom: "",
+        },
+      ];
+    });
+  };
+
+  const handleAddRoomTagToFloor = (floorId: string) => {
+    setPinFloors((prev) =>
+      prev.map((f) => {
+        if (f.id !== floorId) return f;
+        const incoming = f.draftRoom
+          .split(/[,，\n]+/)
+          .map((s) => s.trim())
+          .filter(Boolean);
+        if (incoming.length === 0) return f;
+        const merged = Array.from(new Set([...f.rooms, ...incoming]));
+        return { ...f, rooms: merged, draftRoom: "" };
+      })
+    );
   };
 
   const handleSaveBuildingOrPoint = async (e: React.FormEvent) => {
@@ -776,28 +820,75 @@ export default function AdminSurveyPage() {
       return;
     }
 
+    // Include any typed-but-not-yet-submitted draft room text automatically
+    const normalizedFloors = pinFloors.map((f) => {
+      const extra = f.draftRoom
+        .split(/[,，\n]+/)
+        .map((s) => s.trim())
+        .filter(Boolean);
+      const rooms = Array.from(new Set([...f.rooms, ...extra]));
+      const floorLabel = f.floor.trim()
+        ? f.floor.trim().startsWith("ชั้น")
+          ? f.floor.trim()
+          : `ชั้น ${f.floor.trim()}`
+        : "ชั้น 1";
+      return { floor: floorLabel, rooms };
+    });
+
+    const activeFloors = normalizedFloors.filter((f) => f.rooms.length > 0);
+    const shortFloorNames = normalizedFloors
+      .map((f) => f.floor.replace(/^ชั้น\s*/i, "").trim())
+      .filter(Boolean);
+    const computedFloorRange =
+      shortFloorNames.length > 1
+        ? `${shortFloorNames[0]} - ${shortFloorNames[shortFloorNames.length - 1]}`
+        : shortFloorNames[0] || "";
+
     setIsPinningNode(true);
     try {
       const res = await api.post<MapNode>("/api/admin/nodes", {
         name: trimmedName,
         is_building: pinIsBuilding,
+        category_id: pinIsBuilding ? pinCategoryId : null,
+        floor_range: pinIsBuilding ? computedFloorRange : "",
         keywords: pinIsBuilding ? pinKeywords.trim() : "",
         indoor_guide: pinIsBuilding ? pinIndoorGuide.trim() : "",
-        image_url: pinIsBuilding ? pinImageUrl.trim() : "",
+        image_url: pinIsBuilding ? pinImageUrls[0] || "" : "",
+        image_urls: pinIsBuilding ? pinImageUrls : [],
         lat: activePinCoords[0],
         lng: activePinCoords[1],
       });
+
+      let savedRoomsCount = 0;
+      if (pinIsBuilding && res.data?.id && activeFloors.length > 0) {
+        for (const fl of activeFloors) {
+          for (const roomName of fl.rooms) {
+            await api.post("/api/admin/departments", {
+              node_id: res.data.id,
+              name: roomName,
+              floor: fl.floor,
+              operating_hours: "",
+              phone: "",
+              keywords: "",
+            });
+            savedRoomsCount++;
+          }
+        }
+      }
+
       setPinnedNodes((prev) => [res.data, ...prev]);
       setPinName("");
+      setPinCategoryId(null);
       setPinKeywords("");
       setPinIndoorGuide("");
-      setPinImageUrl("");
+      setPinImageUrls([]);
+      setPinFloors([{ id: "fl-1", floor: "ชั้น 1", rooms: [], draftRoom: "" }]);
       setDraftPinCoords(null);
       setPinSheetOpen(false);
       notify(
         "success",
         pinIsBuilding
-          ? `บันทึกอาคาร "${res.data.name}" ลงแผนที่หลักแล้ว`
+          ? `บันทึกอาคาร "${res.data.name}" (${pinImageUrls.length} รูป, ${savedRoomsCount} ห้อง/แผนก) แล้ว`
           : `บันทึกจุดทางแยก "${res.data.name}" แล้ว`
       );
     } catch (err) {
@@ -1470,16 +1561,245 @@ export default function AdminSurveyPage() {
 
               {pinIsBuilding && (
                 <>
+                  {/* Category Selector */}
+                  {categories.length > 0 && (
+                    <div>
+                      <label className="block text-xs font-bold text-slate-700 mb-1">
+                        หมวดหมู่อาคาร
+                      </label>
+                      <select
+                        value={pinCategoryId ?? ""}
+                        onChange={(e) =>
+                          setPinCategoryId(
+                            e.target.value ? Number(e.target.value) : null
+                          )
+                        }
+                        className="w-full min-h-[40px] px-3 rounded-xl bg-slate-50 border border-slate-200 text-sm text-[#0F172A] focus:bg-white focus:outline-none focus:border-[#0F766E]"
+                      >
+                        <option value="">-- เลือกหมวดหมู่ --</option>
+                        {categories.map((cat) => (
+                          <option key={cat.id} value={cat.id}>
+                            {cat.name}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                  )}
+
+                  {/* Multi-Photo Upload with Client-side Compression */}
+                  <div className="space-y-2 rounded-2xl bg-slate-50 border border-slate-200 p-3">
+                    <div className="flex items-center justify-between gap-2 flex-wrap">
+                      <span className="text-xs font-bold text-slate-700 inline-flex items-center gap-1.5">
+                        <ImageIcon className="w-4 h-4 text-[#0F766E]" />
+                        <span>รูปถ่ายอาคาร ({pinImageUrls.length} รูป)</span>
+                      </span>
+                      <div className="flex items-center gap-1.5">
+                        <label className="min-h-[34px] px-2.5 rounded-xl bg-white hover:bg-teal-50 border border-slate-200 text-xs font-bold text-slate-800 inline-flex items-center gap-1.5 cursor-pointer">
+                          <Camera className="w-3.5 h-3.5 text-[#0F766E]" />
+                          <span>ถ่ายรูป</span>
+                          <input
+                            type="file"
+                            accept="image/*"
+                            capture="environment"
+                            onChange={handleUploadBuildingPhotos}
+                            disabled={Boolean(photoUploadText)}
+                            className="hidden"
+                          />
+                        </label>
+                        <label className="min-h-[34px] px-2.5 rounded-xl bg-[#0F766E] hover:bg-[#115E59] text-white text-xs font-bold inline-flex items-center gap-1.5 cursor-pointer">
+                          {photoUploadText ? (
+                            <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                          ) : (
+                            <Upload className="w-3.5 h-3.5" />
+                          )}
+                          <span>{photoUploadText || "เลือกหลายรูป"}</span>
+                          <input
+                            type="file"
+                            accept="image/*"
+                            multiple
+                            onChange={handleUploadBuildingPhotos}
+                            disabled={Boolean(photoUploadText)}
+                            className="hidden"
+                          />
+                        </label>
+                      </div>
+                    </div>
+
+                    {pinImageUrls.length > 0 && (
+                      <div className="grid grid-cols-3 gap-2 pt-1">
+                        {pinImageUrls.map((url, idx) => (
+                          <div
+                            key={`${url}-${idx}`}
+                            className="relative rounded-xl overflow-hidden border border-slate-200 aspect-[4/3] bg-white"
+                          >
+                            {/* eslint-disable-next-line @next/next/no-img-element */}
+                            <img
+                              src={url}
+                              alt={`รูปที่ ${idx + 1}`}
+                              className="w-full h-full object-cover"
+                            />
+                            {idx === 0 && (
+                              <span className="absolute bottom-1 left-1 px-1.5 py-0.5 rounded bg-[#0F766E]/90 text-white text-[9px] font-bold">
+                                รูปปก
+                              </span>
+                            )}
+                            <button
+                              type="button"
+                              onClick={() =>
+                                setPinImageUrls((prev) =>
+                                  prev.filter((u) => u !== url)
+                                )
+                              }
+                              aria-label="ลบรูปนี้"
+                              className="absolute top-1 right-1 w-6 h-6 rounded-full bg-slate-900/75 hover:bg-rose-600 text-white flex items-center justify-center cursor-pointer"
+                            >
+                              <X className="w-3 h-3" />
+                            </button>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Floor & Room Tag Builder */}
+                  <div className="space-y-2.5 rounded-2xl bg-slate-50 border border-slate-200 p-3">
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="text-xs font-bold text-slate-700 inline-flex items-center gap-1.5">
+                        <Layers className="w-4 h-4 text-[#0F766E]" />
+                        <span>จำนวนชั้น และห้อง/แผนกในแต่ละชั้น</span>
+                      </span>
+                      <button
+                        type="button"
+                        onClick={handleAddSurveyFloor}
+                        className="min-h-[30px] px-2.5 rounded-full bg-teal-50 hover:bg-teal-100 border border-teal-200 text-[11px] font-bold text-[#0F766E] inline-flex items-center gap-1 cursor-pointer"
+                      >
+                        <Plus className="w-3 h-3" />
+                        <span>เพิ่มชั้น</span>
+                      </button>
+                    </div>
+
+                    <div className="space-y-2">
+                      {pinFloors.map((fl) => (
+                        <div
+                          key={fl.id}
+                          className="rounded-xl bg-white border border-slate-200 p-2.5 space-y-2"
+                        >
+                          <div className="flex items-center gap-2">
+                            <input
+                              type="text"
+                              value={fl.floor}
+                              onChange={(e) =>
+                                setPinFloors((prev) =>
+                                  prev.map((item) =>
+                                    item.id === fl.id
+                                      ? { ...item, floor: e.target.value }
+                                      : item
+                                  )
+                                )
+                              }
+                              placeholder="เช่น ชั้น 1, ชั้น G"
+                              className="w-24 min-h-[32px] px-2.5 rounded-lg bg-teal-50 border border-teal-200 text-xs font-bold text-[#0F766E] focus:outline-none"
+                            />
+                            <span className="text-[11px] text-slate-400 flex-1">
+                              {fl.rooms.length} ห้อง/แผนก
+                            </span>
+                            {pinFloors.length > 1 && (
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  setPinFloors((prev) =>
+                                    prev.filter((item) => item.id !== fl.id)
+                                  )
+                                }
+                                aria-label="ลบชั้นนี้"
+                                className="w-7 h-7 rounded-lg hover:bg-rose-50 text-slate-400 hover:text-[#BE123C] flex items-center justify-center cursor-pointer"
+                              >
+                                <Trash2 className="w-3.5 h-3.5" />
+                              </button>
+                            )}
+                          </div>
+
+                          {fl.rooms.length > 0 && (
+                            <div className="flex flex-wrap gap-1">
+                              {fl.rooms.map((room) => (
+                                <span
+                                  key={room}
+                                  className="inline-flex items-center gap-1 pl-2 pr-1 py-0.5 rounded-lg bg-teal-50 border border-teal-200 text-[11px] font-bold text-[#0F766E]"
+                                >
+                                  <Stethoscope className="w-3 h-3 shrink-0" />
+                                  <span>{room}</span>
+                                  <button
+                                    type="button"
+                                    onClick={() =>
+                                      setPinFloors((prev) =>
+                                        prev.map((item) =>
+                                          item.id === fl.id
+                                            ? {
+                                                ...item,
+                                                rooms: item.rooms.filter(
+                                                  (r) => r !== room
+                                                ),
+                                              }
+                                            : item
+                                        )
+                                      )
+                                    }
+                                    className="w-4 h-4 rounded hover:bg-teal-200/70 flex items-center justify-center cursor-pointer"
+                                  >
+                                    <X className="w-2.5 h-2.5" />
+                                  </button>
+                                </span>
+                              ))}
+                            </div>
+                          )}
+
+                          <div className="flex items-center gap-1.5">
+                            <input
+                              type="text"
+                              value={fl.draftRoom}
+                              onChange={(e) =>
+                                setPinFloors((prev) =>
+                                  prev.map((item) =>
+                                    item.id === fl.id
+                                      ? { ...item, draftRoom: e.target.value }
+                                      : item
+                                  )
+                                )
+                              }
+                              onKeyDown={(e) => {
+                                if (e.key === "Enter") {
+                                  e.preventDefault();
+                                  handleAddRoomTagToFloor(fl.id);
+                                }
+                              }}
+                              placeholder="พิมพ์ห้อง/แผนก เช่น ห้องเอกซเรย์, ห้องผ่าตัด"
+                              className="flex-1 min-h-[34px] px-2.5 rounded-lg bg-slate-50 border border-slate-200 text-xs text-slate-800 focus:bg-white focus:outline-none focus:border-[#0F766E]"
+                            />
+                            <button
+                              type="button"
+                              onClick={() => handleAddRoomTagToFloor(fl.id)}
+                              disabled={!fl.draftRoom.trim()}
+                              className="min-h-[34px] px-2.5 rounded-lg bg-slate-100 hover:bg-teal-50 disabled:opacity-40 text-xs font-bold text-[#0F766E] inline-flex items-center gap-1 cursor-pointer shrink-0"
+                            >
+                              <Plus className="w-3.5 h-3.5" />
+                              <span>เพิ่ม</span>
+                            </button>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+
                   <div>
                     <label className="block text-xs font-bold text-slate-700 mb-1">
-                      แผนก / คำค้นหา (คั่นด้วยจุลภาค)
+                      คำค้นหาเพิ่มเติม (ถ้ามี)
                     </label>
                     <input
                       type="text"
                       value={pinKeywords}
                       onChange={(e) => setPinKeywords(e.target.value)}
-                      placeholder="เช่น NICU, ตา, หู คอ จมูก, รับยา"
-                      className="w-full min-h-[42px] px-3.5 rounded-xl bg-slate-50 border border-slate-200 text-sm text-[#0F172A] focus:bg-white focus:outline-none focus:border-[#0F766E]"
+                      placeholder="เช่น NICU, OPD, รับยา"
+                      className="w-full min-h-[40px] px-3.5 rounded-xl bg-slate-50 border border-slate-200 text-sm text-[#0F172A] focus:bg-white focus:outline-none focus:border-[#0F766E]"
                     />
                   </div>
                   <div>
@@ -1490,52 +1810,9 @@ export default function AdminSurveyPage() {
                       rows={2}
                       value={pinIndoorGuide}
                       onChange={(e) => setPinIndoorGuide(e.target.value)}
-                      placeholder="เช่น ชั้น 1 รับยา, ชั้น 2 คลินิกผิวหนัง"
+                      placeholder="เช่น เข้าประตูทิศใต้มีลิฟต์กลางโถง"
                       className="w-full px-3.5 py-2 rounded-xl bg-slate-50 border border-slate-200 text-sm text-[#0F172A] focus:bg-white focus:outline-none focus:border-[#0F766E]"
                     />
-                  </div>
-                  <div className="space-y-2">
-                    <div className="flex items-center gap-2">
-                      <label className="min-h-[40px] px-3.5 rounded-xl bg-slate-100 hover:bg-teal-50 border border-slate-200 text-xs font-bold text-slate-800 inline-flex items-center gap-2 cursor-pointer">
-                        {isUploadingPhoto ? (
-                          <Loader2 className="w-4 h-4 animate-spin text-[#0F766E]" />
-                        ) : (
-                          <Camera className="w-4 h-4 text-[#0F766E]" />
-                        )}
-                        <span>
-                          {isUploadingPhoto
-                            ? "กำลังอัปโหลด..."
-                            : "ถ่ายภาพ / แนบรูปหน้าตึก"}
-                        </span>
-                        <input
-                          type="file"
-                          accept="image/*"
-                          capture="environment"
-                          onChange={handleUploadBuildingPhoto}
-                          disabled={isUploadingPhoto}
-                          className="hidden"
-                        />
-                      </label>
-                      {pinImageUrl && (
-                        <button
-                          type="button"
-                          onClick={() => setPinImageUrl("")}
-                          className="text-xs font-semibold text-rose-600 hover:underline cursor-pointer"
-                        >
-                          ลบรูป
-                        </button>
-                      )}
-                    </div>
-                    {pinImageUrl && (
-                      <div className="rounded-xl overflow-hidden border border-slate-200">
-                        {/* eslint-disable-next-line @next/next/no-img-element */}
-                        <img
-                          src={pinImageUrl}
-                          alt="ตัวอย่างภาพหน้าอาคาร"
-                          className="w-full h-28 object-cover"
-                        />
-                      </div>
-                    )}
                   </div>
                 </>
               )}

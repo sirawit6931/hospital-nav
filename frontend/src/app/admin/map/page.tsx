@@ -25,6 +25,7 @@ import {
   MapPin,
   Maximize2,
   Minimize2,
+  PenTool,
   Pencil,
   Plus,
   RotateCcw,
@@ -50,7 +51,10 @@ import {
   type SurveyTrack,
   type UploadResponse,
 } from "@/lib/api";
-import type { AdminEditorMode } from "@/components/maps/AdminMapEditor";
+import type {
+  AdminEditorMode,
+  DraftPathPoint,
+} from "@/components/maps/AdminMapEditor";
 import {
   EMPTY_MAP_3D_OVERRIDES,
   WALL_MAP_COLOR_PRESETS,
@@ -117,6 +121,15 @@ interface EdgeFormState {
   closure_reason: string;
 }
 
+type MapUndoAction =
+  | { kind: "batch_path"; edgeIds: number[]; createdNodeIds: number[] }
+  | { kind: "create_edge"; edgeId: number }
+  | { kind: "update_edge"; before: MapEdge }
+  | { kind: "delete_edge"; before: MapEdge }
+  | { kind: "create_node"; nodeId: number }
+  | { kind: "update_node"; before: MapNode }
+  | { kind: "delete_node"; before: MapNode };
+
 export default function AdminMapPage() {
   const router = useRouter();
   const [authChecked, setAuthChecked] = useState(false);
@@ -137,6 +150,11 @@ export default function AdminMapPage() {
   const [cloneModalOpen, setCloneModalOpen] = useState(false);
   const [cloneName, setCloneName] = useState("");
   const [cloneDesc, setCloneDesc] = useState("");
+  const [cloneKeepBuildingsOnly, setCloneKeepBuildingsOnly] = useState(false);
+  const [draftPathPoints, setDraftPathPoints] = useState<DraftPathPoint[]>([]);
+  const [isSavingDraftPath, setIsSavingDraftPath] = useState(false);
+  const [mapUndoStack, setMapUndoStack] = useState<MapUndoAction[]>([]);
+  const [isUndoingMap, setIsUndoingMap] = useState(false);
   const [editVersionModal, setEditVersionModal] = useState<{
     id: number;
     name: string;
@@ -368,11 +386,12 @@ export default function AdminMapPage() {
   const handleOpenCloneModal = () => {
     const curr = versions.find((v) => v.id === activeVersionId);
     setCloneName(
-      curr ? `ฉบับร่างจาก ${curr.name}` : `ฉบับร่างแผนที่ใหม่`
+      curr ? `ชุดเส้นทางใหม่จาก ${curr.name}` : `ฉบับร่างแผนที่ใหม่`
     );
     setCloneDesc(
-      curr ? `คัดลอกจากเวอร์ชัน #${curr.id} เพื่อปรับปรุงก่อนเผยแพร่` : ""
+      curr ? `คัดลอกจากเวอร์ชัน #${curr.id} เพื่อจัดทำเส้นทางใหม่` : ""
     );
+    setCloneKeepBuildingsOnly(false);
     setCloneModalOpen(true);
   };
 
@@ -386,14 +405,21 @@ export default function AdminMapPage() {
         {
           name: cloneName.trim(),
           description: cloneDesc.trim(),
+          keep_buildings_only: cloneKeepBuildingsOnly,
         }
       );
       setCloneModalOpen(false);
       setLiveWarningDismissed(false);
+      setDraftPathPoints([]);
       await loadVersionsAndMap(res.data.id);
+      if (cloneKeepBuildingsOnly) {
+        setMode("draw_path");
+      }
       showToast(
         "success",
-        `คัดลอกเป็นฉบับร่าง "${res.data.name}" เรียบร้อยแล้ว แก้ไขได้อย่างปลอดภัยโดยไม่กระทบหน้าผู้ใช้จริง`
+        cloneKeepBuildingsOnly
+          ? `สร้างชุดเส้นทางใหม่ "${res.data.name}" แล้ว (เก็บตึกสีเขียวครบ พร้อมวาดเส้นทางอิสระ)`
+          : `คัดลอกเป็นฉบับร่าง "${res.data.name}" เรียบร้อยแล้ว`
       );
     } catch (err) {
       showToast(
@@ -402,6 +428,105 @@ export default function AdminMapPage() {
       );
     } finally {
       setIsVersionBusy(false);
+    }
+  };
+
+  const handleClearVersionPaths = async (versionId: number) => {
+    setIsVersionBusy(true);
+    try {
+      await api.post(`/api/admin/map-versions/${versionId}/clear-paths`);
+      setEditVersionModal(null);
+      setDraftPathPoints([]);
+      await loadVersionsAndMap(versionId);
+      setMode("draw_path");
+      showToast(
+        "success",
+        "ล้างเส้นทางและจุดทางแยกเดิมแล้ว (ข้อมูลตึกสีเขียวอยู่ครบทั้งหมด)"
+      );
+    } catch (err) {
+      showToast("error", extractApiError(err, "ไม่สามารถล้างเส้นทางเดิมได้"));
+    } finally {
+      setIsVersionBusy(false);
+    }
+  };
+
+  const pushMapUndo = useCallback((action: MapUndoAction) => {
+    setMapUndoStack((prev) => {
+      const next = [...prev, action];
+      return next.length > 30 ? next.slice(next.length - 30) : next;
+    });
+  }, []);
+
+  const handleSaveDraftPath = async () => {
+    if (draftPathPoints.length < 2) {
+      showToast("error", "คลิกอย่างน้อย 2 จุดเพื่อสร้างเส้นทาง");
+      return;
+    }
+    setIsSavingDraftPath(true);
+    try {
+      const resolvedNodeIds: number[] = [];
+      const createdNodeIds: number[] = [];
+      for (let i = 0; i < draftPathPoints.length; i++) {
+        const pt = draftPathPoints[i];
+        if (pt.nodeId && pt.nodeId > 0) {
+          resolvedNodeIds.push(pt.nodeId);
+        } else {
+          const res = await api.post<MapNode>(
+            "/api/admin/nodes",
+            {
+              name: "",
+              is_building: false,
+              keywords: "",
+              indoor_guide: "",
+              image_url: "",
+              lat: Number(pt.lat.toFixed(7)),
+              lng: Number(pt.lng.toFixed(7)),
+            },
+            {
+              params: activeVersionId
+                ? { version_id: activeVersionId }
+                : undefined,
+            }
+          );
+          resolvedNodeIds.push(res.data.id);
+          createdNodeIds.push(res.data.id);
+        }
+      }
+
+      const createdEdgeIds: number[] = [];
+      for (let i = 0; i < resolvedNodeIds.length - 1; i++) {
+        const fromId = resolvedNodeIds[i];
+        const toId = resolvedNodeIds[i + 1];
+        if (fromId === toId) continue;
+        const edgeRes = await api.post<MapEdge>("/api/admin/edges", {
+          from_node: fromId,
+          to_node: toId,
+          instruction: edgeInstruction.trim(),
+          is_wheelchair_friendly: edgeWheelchair,
+          is_covered: edgeCovered,
+          is_indoor_passthrough: edgeIndoor,
+        });
+        createdEdgeIds.push(edgeRes.data.id);
+      }
+
+      if (createdEdgeIds.length > 0 || createdNodeIds.length > 0) {
+        pushMapUndo({
+          kind: "batch_path",
+          edgeIds: createdEdgeIds,
+          createdNodeIds,
+        });
+      }
+
+      setDraftPathPoints([]);
+      setEdgeInstruction("");
+      if (activeVersionId) {
+        await loadVersionData(activeVersionId);
+      }
+      showToast("success", `บันทึกเส้นทางแล้ว (${createdEdgeIds.length} ช่วง)`);
+    } catch (err) {
+      showToast("error", extractApiError(err, "บันทึกเส้นทางไม่สำเร็จ"));
+    } finally {
+      setIsSavingDraftPath(false);
     }
   };
 
@@ -592,20 +717,135 @@ export default function AdminMapPage() {
     });
   }, [showToast]);
 
-  // Support Ctrl+Z shortcut in Mode 6
+  const handleUndoMapAction = useCallback(async () => {
+    if (isUndoingMap || mapUndoStack.length === 0) return;
+    const last = mapUndoStack[mapUndoStack.length - 1];
+    setMapUndoStack((prev) => prev.slice(0, -1));
+    setIsUndoingMap(true);
+    try {
+      if (last.kind === "batch_path") {
+        for (const eid of last.edgeIds) {
+          await api.delete(`/api/admin/edges/${eid}`).catch(() => { });
+        }
+        for (const nid of last.createdNodeIds) {
+          await api.delete(`/api/admin/nodes/${nid}`).catch(() => { });
+        }
+      } else if (last.kind === "create_edge") {
+        await api.delete(`/api/admin/edges/${last.edgeId}`);
+      } else if (last.kind === "update_edge") {
+        await api.put(`/api/admin/edges/${last.before.id}`, {
+          is_active: last.before.is_active,
+          is_wheelchair_friendly: last.before.is_wheelchair_friendly,
+          is_covered: Boolean(last.before.is_covered),
+          is_indoor_passthrough: Boolean(last.before.is_indoor_passthrough),
+          instruction: last.before.instruction || "",
+          closure_reason: last.before.closure_reason || "",
+        });
+      } else if (last.kind === "delete_edge") {
+        await api.post("/api/admin/edges", {
+          from_node: last.before.from_node,
+          to_node: last.before.to_node,
+          instruction: last.before.instruction || "",
+          is_wheelchair_friendly: last.before.is_wheelchair_friendly,
+          is_covered: Boolean(last.before.is_covered),
+          is_indoor_passthrough: Boolean(last.before.is_indoor_passthrough),
+          closure_reason: last.before.closure_reason || "",
+        });
+      } else if (last.kind === "create_node") {
+        await api.delete(`/api/admin/nodes/${last.nodeId}`);
+      } else if (last.kind === "update_node") {
+        await api.put(`/api/admin/nodes/${last.before.id}`, {
+          name: last.before.name || "",
+          is_building: last.before.is_building,
+          keywords: last.before.keywords || "",
+          indoor_guide: last.before.indoor_guide || "",
+          image_url: last.before.image_url || "",
+          lat: last.before.lat,
+          lng: last.before.lng,
+        });
+      } else if (last.kind === "delete_node") {
+        await api.post(
+          "/api/admin/nodes",
+          {
+            name: last.before.name || "",
+            is_building: last.before.is_building,
+            keywords: last.before.keywords || "",
+            indoor_guide: last.before.indoor_guide || "",
+            image_url: last.before.image_url || "",
+            lat: last.before.lat,
+            lng: last.before.lng,
+          },
+          {
+            params: activeVersionId
+              ? { version_id: activeVersionId }
+              : undefined,
+          }
+        );
+      }
+
+      if (activeVersionId) {
+        await loadVersionData(activeVersionId);
+      }
+      showToast("success", "ย้อนกลับแล้ว");
+    } catch (err) {
+      showToast("error", extractApiError(err, "ย้อนกลับไม่สำเร็จ"));
+    } finally {
+      setIsUndoingMap(false);
+    }
+  }, [isUndoingMap, mapUndoStack, activeVersionId, loadVersionData, showToast]);
+
+  const handleGlobalUndo = useCallback(() => {
+    if (mode === "draw_path" && draftPathPoints.length > 0) {
+      setDraftPathPoints((prev) => prev.slice(0, -1));
+      return;
+    }
+    if (mode === "customize_3d" && undoStack.length > 0) {
+      handleUndo3D();
+      return;
+    }
+    if (mapUndoStack.length > 0) {
+      handleUndoMapAction();
+    }
+  }, [
+    mode,
+    draftPathPoints.length,
+    undoStack.length,
+    handleUndo3D,
+    mapUndoStack.length,
+    handleUndoMapAction,
+  ]);
+
+  // Global Ctrl+Z (Undo across all modes: draw path, edges, nodes, 3D blocks) and Esc cancel
   useEffect(() => {
-    if (mode !== "customize_3d") return;
     const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        if (clickToPlace3D || clickToMove3D) {
+          e.preventDefault();
+          setClickToPlace3D(false);
+          setClickToMove3D(false);
+        } else if (selectedSourceNodeId !== null) {
+          setSelectedSourceNodeId(null);
+        } else if (splitTrackId !== null) {
+          setSplitTrackId(null);
+        }
+        return;
+      }
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "z") {
         const tag = (e.target as HTMLElement | null)?.tagName;
         if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return;
         e.preventDefault();
-        handleUndo3D();
+        handleGlobalUndo();
       }
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [mode, handleUndo3D]);
+  }, [
+    handleGlobalUndo,
+    clickToPlace3D,
+    clickToMove3D,
+    selectedSourceNodeId,
+    splitTrackId,
+  ]);
 
   const handleSelectBuilding3D = useCallback(
     (b: Building3DProps | null) => {
@@ -905,8 +1145,19 @@ export default function AdminMapPage() {
     }
   }, [overrides3D, activeVersionId, showToast]);
 
-  // Mode 1: Click empty map -> Open modal to create a new Node, OR place/move 3D model in customize_3d mode
+  // Mode 1: Click empty map -> Open modal to create a new Node, draw_path -> append waypoint, OR place/move 3D model
   const handleMapClick = (lat: number, lng: number) => {
+    if (mode === "draw_path") {
+      setDraftPathPoints((prev) => [
+        ...prev,
+        {
+          lat: Number(lat.toFixed(7)),
+          lng: Number(lng.toFixed(7)),
+          nodeId: null,
+        },
+      ]);
+      return;
+    }
     if (mode === "customize_3d") {
       if (clickToPlace3D) {
         setClickToPlace3D(false);
@@ -942,6 +1193,22 @@ export default function AdminMapPage() {
 
   // Click existing node -> behavior depends on active mode
   const handleNodeClick = async (node: MapNode) => {
+    if (mode === "draw_path") {
+      setDraftPathPoints((prev) => {
+        const last = prev[prev.length - 1];
+        if (last && last.nodeId === node.id) return prev;
+        return [
+          ...prev,
+          {
+            lat: node.lat,
+            lng: node.lng,
+            nodeId: node.id,
+            label: node.name || `#${node.id}`,
+          },
+        ];
+      });
+      return;
+    }
     if (mode === "add_node") {
       setNodeModal({
         id: node.id,
@@ -981,12 +1248,10 @@ export default function AdminMapPage() {
           is_indoor_passthrough: edgeIndoor,
         });
         setEdges((prev) => [...prev, res.data]);
+        pushMapUndo({ kind: "create_edge", edgeId: res.data.id });
         setSelectedSourceNodeId(null);
         setEdgeInstruction("");
-        showToast(
-          "success",
-          `เชื่อมเส้นทางสำเร็จ (${Math.round(res.data.distance_m)} เมตร)`
-        );
+        showToast("success", `เชื่อมเส้นทางแล้ว (${Math.round(res.data.distance_m)} ม.)`);
       } catch (err) {
         showToast("error", extractApiError(err, "ไม่สามารถเชื่อมเส้นทางได้"));
       }
@@ -1034,6 +1299,7 @@ export default function AdminMapPage() {
   const handleSaveEdge = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!edgeModal) return;
+    const beforeEdge = edges.find((item) => item.id === edgeModal.id);
     setIsSavingEdge(true);
     try {
       const res = await api.put<MapEdge>(`/api/admin/edges/${edgeModal.id}`, {
@@ -1044,18 +1310,16 @@ export default function AdminMapPage() {
         instruction: edgeModal.instruction.trim(),
         closure_reason: edgeModal.is_active ? "" : edgeModal.closure_reason.trim(),
       });
+      if (beforeEdge) {
+        pushMapUndo({ kind: "update_edge", before: beforeEdge });
+      }
       setEdges((prev) =>
         prev.map((item) => (item.id === edgeModal.id ? res.data : item))
       );
       setEdgeModal(null);
-      showToast(
-        "success",
-        res.data.is_active
-          ? `อัปเดตและเปิดใช้งานเส้นทาง #${res.data.id} เรียบร้อยแล้ว`
-          : `บันทึกปิดเส้นทาง #${res.data.id} ชั่วคราวเรียบร้อยแล้ว`
-      );
+      showToast("success", `บันทึกเส้นทาง #${res.data.id} แล้ว`);
     } catch (err) {
-      showToast("error", extractApiError(err, "ไม่สามารถบันทึกข้อมูลเส้นทางได้"));
+      showToast("error", extractApiError(err, "บันทึกเส้นทางไม่สำเร็จ"));
     } finally {
       setIsSavingEdge(false);
     }
@@ -1101,29 +1365,33 @@ export default function AdminMapPage() {
       };
 
       if (nodeModal.id) {
+        const beforeNode = nodes.find((n) => n.id === nodeModal.id);
         const res = await api.put<MapNode>(
           `/api/admin/nodes/${nodeModal.id}`,
           payload
         );
+        if (beforeNode) {
+          pushMapUndo({ kind: "update_node", before: beforeNode });
+        }
         setNodes((prev) =>
           prev.map((n) => (n.id === res.data.id ? res.data : n))
         );
-        // Refresh edges in case node moved and PostGIS updated edge lengths
         const edgesRes = await api.get<MapEdge[]>("/api/admin/edges", {
           params: activeVersionId ? { version_id: activeVersionId } : undefined,
         });
         setEdges(Array.isArray(edgesRes.data) ? edgesRes.data : []);
-        showToast("success", `อัปเดตข้อมูลจุด #${res.data.id} เรียบร้อยแล้ว`);
+        showToast("success", `บันทึกจุด #${res.data.id} แล้ว`);
       } else {
         const res = await api.post<MapNode>("/api/admin/nodes", payload, {
           params: activeVersionId ? { version_id: activeVersionId } : undefined,
         });
         setNodes((prev) => [...prev, res.data]);
-        showToast("success", `เพิ่มจุด #${res.data.id} เรียบร้อยแล้ว`);
+        pushMapUndo({ kind: "create_node", nodeId: res.data.id });
+        showToast("success", `เพิ่มจุด #${res.data.id} แล้ว`);
       }
       setNodeModal(null);
     } catch (err) {
-      showToast("error", extractApiError(err, "ไม่สามารถบันทึกข้อมูลจุดได้"));
+      showToast("error", extractApiError(err, "บันทึกจุดไม่สำเร็จ"));
     } finally {
       setIsSavingNode(false);
     }
@@ -1134,22 +1402,30 @@ export default function AdminMapPage() {
     setIsDeleting(true);
     try {
       if (deleteTarget.type === "node") {
+        const beforeNode = nodes.find((n) => n.id === deleteTarget.id);
         await api.delete(`/api/admin/nodes/${deleteTarget.id}`);
+        if (beforeNode) {
+          pushMapUndo({ kind: "delete_node", before: beforeNode });
+        }
         setNodes((prev) => prev.filter((n) => n.id !== deleteTarget.id));
         setEdges((prev) =>
           prev.filter(
             (e) => e.from_node !== deleteTarget.id && e.to_node !== deleteTarget.id
           )
         );
-        showToast("success", `ลบ${deleteTarget.label}เรียบร้อยแล้ว`);
+        showToast("success", `ลบจุดแล้ว`);
       } else if (deleteTarget.type === "edge") {
+        const beforeEdge = edges.find((e) => e.id === deleteTarget.id);
         await api.delete(`/api/admin/edges/${deleteTarget.id}`);
+        if (beforeEdge) {
+          pushMapUndo({ kind: "delete_edge", before: beforeEdge });
+        }
         setEdges((prev) => prev.filter((e) => e.id !== deleteTarget.id));
-        showToast("success", `ลบ${deleteTarget.label}เรียบร้อยแล้ว`);
+        showToast("success", `ลบเส้นทางแล้ว`);
       } else {
         await api.delete(`/api/admin/surveys/${deleteTarget.id}`);
         setSurveys((prev) => prev.filter((s) => s.id !== deleteTarget.id));
-        showToast("success", `ลบรอยเดินสำรวจเรียบร้อยแล้ว`);
+        showToast("success", `ลบรอยเดินแล้ว`);
       }
       setDeleteTarget(null);
     } catch (err) {
@@ -1178,18 +1454,21 @@ export default function AdminMapPage() {
     connect_edge: selectedSourceNodeId
       ? `เลือกจุดเริ่มต้น #${selectedSourceNodeId} แล้ว — คลิกจุดที่ 2 เพื่อเชื่อมเส้นทาง (คำนวณระยะทาง PostGIS อัตโนมัติ)`
       : "คลิกจุดที่ 1 จากนั้นคลิกจุดที่ 2 เพื่อสร้างเส้นเชื่อมทางเดิน",
+    draw_path:
+      "คลิกต่อเนื่องตามแนวทางเดิน (หรือคลิกจุดตึกสีเขียวเพื่อเชื่อมต่อ) แล้วกด 'บันทึกเส้นทาง' ได้อิสระ",
     toggle_edge:
       "คลิกที่เส้นทางใดก็ได้เพื่อเปิดหน้าต่างแก้ไขคุณสมบัติเส้นทาง (เปิด/ปิดปรับปรุง, ระบุเหตุผล, ทางมีหลังคา, เดินทะลุอาคาร)",
     delete: "คลิกที่จุด (Node) หรือเส้นเชื่อม (Edge) ที่ต้องการลบออกจากแผนที่",
     customize_3d: clickToPlace3D
       ? "คลิกตำแหน่งใดก็ได้บนแผนที่ 3D เพื่อวางบล็อก 3D ใหม่ตรงจุดนั้น"
       : clickToMove3D
-      ? "คลิกตำแหน่งใหม่บนแผนที่ 3D เพื่อย้ายบล็อกที่เลือกไปวางตรงจุดนั้น"
-      : "คลิกเลือกบล็อก 3D แล้วลากจุดสีฟ้า (ย้าย), จุดสี่เหลี่ยมขอบข้าง (ยืด-หด), หรือจุดสีเขียว (หมุน) ได้อิสระบนแผนที่",
+        ? "คลิกตำแหน่งใหม่บนแผนที่ 3D เพื่อย้ายบล็อกที่เลือกไปวางตรงจุดนั้น"
+        : "คลิกเลือกบล็อก 3D แล้วลากจุดสีฟ้า (ย้าย), จุดสี่เหลี่ยมขอบข้าง (ยืด-หด), หรือจุดสีเขียว (หมุน) ได้อิสระบนแผนที่",
   };
 
   const modeLabel: Record<AdminEditorMode, string> = {
     add_node: "เพิ่ม/แก้ไขจุด",
+    draw_path: "วาดเส้นอิสระ",
     connect_edge: "เชื่อมเส้นทาง",
     toggle_edge: "เปิด/ปิดเส้นทาง",
     delete: "ลบจุด/เส้น",
@@ -1216,9 +1495,19 @@ export default function AdminMapPage() {
             surveys={visibleSurveys}
             showSurveys={showSurveys}
             selectedSourceNodeId={selectedSourceNodeId}
+            draftPathPoints={draftPathPoints}
             overrides3D={overrides3D}
             selectedBuilding3DId={selected3D?.id ?? null}
             selected3D={selected3D}
+            isPlacingBlock3D={clickToPlace3D}
+            ghostBlockTemplate={{
+              width_m: 24,
+              depth_m: 18,
+              angle_deg: selected3D?.angle_deg ?? -24,
+              height: 14,
+              color: selected3D?.color ?? "#0EA5E9",
+            }}
+            onCancelPlacement3D={() => setClickToPlace3D(false)}
             showSatelliteUnderlay={showSatelliteUnderlay}
             buildingOpacity={buildingOpacity}
             onSelectBuilding3D={handleSelectBuilding3D}
@@ -1243,6 +1532,7 @@ export default function AdminMapPage() {
             surveys={visibleSurveys}
             showSurveys={showSurveys}
             selectedSourceNodeId={selectedSourceNodeId}
+            draftPathPoints={draftPathPoints}
             onMapClick={handleMapClick}
             onNodeClick={handleNodeClick}
             onEdgeClick={handleEdgeClick}
@@ -1261,16 +1551,14 @@ export default function AdminMapPage() {
           <div className="flex items-center gap-1.5 shrink-0">
             {activeVersion && (
               <span
-                className={`inline-flex items-center gap-1 px-2 py-1 rounded-lg text-[11px] font-bold shrink-0 ${
-                  activeVersion.is_live
+                className={`inline-flex items-center gap-1 px-2 py-1 rounded-lg text-[11px] font-bold shrink-0 ${activeVersion.is_live
                     ? "bg-emerald-100 text-emerald-800 border border-emerald-200"
                     : "bg-amber-100 text-amber-800 border border-amber-200"
-                }`}
+                  }`}
               >
                 <span
-                  className={`w-1.5 h-1.5 rounded-full ${
-                    activeVersion.is_live ? "bg-emerald-600" : "bg-amber-500"
-                  }`}
+                  className={`w-1.5 h-1.5 rounded-full ${activeVersion.is_live ? "bg-emerald-600" : "bg-amber-500"
+                    }`}
                 />
                 <span>{activeVersion.is_live ? "ใช้งานจริง" : "ฉบับร่าง"}</span>
               </span>
@@ -1359,11 +1647,10 @@ export default function AdminMapPage() {
               onClick={() => handleModeChange("add_node")}
               title="1. เพิ่ม/แก้ไขตึกและจุด"
               aria-label="1. เพิ่ม/แก้ไขตึกและจุด"
-              className={`h-9 px-2.5 rounded-xl text-xs font-bold inline-flex items-center gap-1.5 transition-colors cursor-pointer ${
-                mode === "add_node"
+              className={`h-9 px-2.5 rounded-xl text-xs font-bold inline-flex items-center gap-1.5 transition-colors cursor-pointer ${mode === "add_node"
                   ? "bg-[#0F766E] text-white shadow-xs"
                   : "text-slate-600 hover:bg-slate-100"
-              }`}
+                }`}
             >
               <Plus className="w-4 h-4 shrink-0" />
               {mode === "add_node" && (
@@ -1373,14 +1660,29 @@ export default function AdminMapPage() {
 
             <button
               type="button"
+              onClick={() => handleModeChange("draw_path")}
+              title="วาดเส้นทางอิสระ (คลิกต่อเนื่องแล้วบันทึก)"
+              aria-label="วาดเส้นทางอิสระ"
+              className={`h-9 px-2.5 rounded-xl text-xs font-bold inline-flex items-center gap-1.5 transition-colors cursor-pointer ${mode === "draw_path"
+                  ? "bg-orange-500 text-white shadow-xs"
+                  : "text-slate-600 hover:bg-slate-100"
+                }`}
+            >
+              <PenTool className="w-4 h-4 shrink-0" />
+              {mode === "draw_path" && (
+                <span className="hidden xl:inline">{modeLabel.draw_path}</span>
+              )}
+            </button>
+
+            <button
+              type="button"
               onClick={() => handleModeChange("connect_edge")}
               title="2. เชื่อมเส้นทาง"
               aria-label="2. เชื่อมเส้นทาง"
-              className={`h-9 px-2.5 rounded-xl text-xs font-bold inline-flex items-center gap-1.5 transition-colors cursor-pointer ${
-                mode === "connect_edge"
+              className={`h-9 px-2.5 rounded-xl text-xs font-bold inline-flex items-center gap-1.5 transition-colors cursor-pointer ${mode === "connect_edge"
                   ? "bg-[#0F766E] text-white shadow-xs"
                   : "text-slate-600 hover:bg-slate-100"
-              }`}
+                }`}
             >
               <GitBranch className="w-4 h-4 shrink-0" />
               {mode === "connect_edge" && (
@@ -1395,11 +1697,10 @@ export default function AdminMapPage() {
               onClick={() => handleModeChange("toggle_edge")}
               title="3. เปิด/ปิด และแก้ไขคุณสมบัติเส้นทาง"
               aria-label="3. เปิด/ปิดเส้นทาง"
-              className={`h-9 px-2.5 rounded-xl text-xs font-bold inline-flex items-center gap-1.5 transition-colors cursor-pointer ${
-                mode === "toggle_edge"
+              className={`h-9 px-2.5 rounded-xl text-xs font-bold inline-flex items-center gap-1.5 transition-colors cursor-pointer ${mode === "toggle_edge"
                   ? "bg-[#1D4ED8] text-white shadow-xs"
                   : "text-slate-600 hover:bg-slate-100"
-              }`}
+                }`}
             >
               <ToggleLeft className="w-4 h-4 shrink-0" />
               {mode === "toggle_edge" && (
@@ -1412,11 +1713,10 @@ export default function AdminMapPage() {
               onClick={() => handleModeChange("delete")}
               title="4. ลบจุด / เส้นเชื่อม"
               aria-label="4. ลบจุด / เส้นเชื่อม"
-              className={`h-9 px-2.5 rounded-xl text-xs font-bold inline-flex items-center gap-1.5 transition-colors cursor-pointer ${
-                mode === "delete"
+              className={`h-9 px-2.5 rounded-xl text-xs font-bold inline-flex items-center gap-1.5 transition-colors cursor-pointer ${mode === "delete"
                   ? "bg-[#BE123C] text-white shadow-xs"
                   : "text-slate-600 hover:bg-slate-100"
-              }`}
+                }`}
             >
               <Trash2 className="w-4 h-4 shrink-0" />
               {mode === "delete" && (
@@ -1429,11 +1729,10 @@ export default function AdminMapPage() {
               onClick={() => setShowSurveys((prev) => !prev)}
               title={`5. แสดง Survey Tracks (${surveys.length})`}
               aria-label="5. แสดง Survey Tracks"
-              className={`h-9 px-2.5 rounded-xl text-xs font-bold inline-flex items-center gap-1.5 transition-colors cursor-pointer ${
-                showSurveys
+              className={`h-9 px-2.5 rounded-xl text-xs font-bold inline-flex items-center gap-1.5 transition-colors cursor-pointer ${showSurveys
                   ? "bg-orange-500 text-white shadow-xs"
                   : "text-slate-600 hover:bg-slate-100"
-              }`}
+                }`}
             >
               <Route className="w-4 h-4 shrink-0" />
               {showSurveys && (
@@ -1454,11 +1753,10 @@ export default function AdminMapPage() {
               }}
               title="6. ปรับแต่ง/ยื่นโมเดล 3D"
               aria-label="6. ปรับแต่ง/ยื่นโมเดล 3D"
-              className={`h-9 px-2.5 rounded-xl text-xs font-bold inline-flex items-center gap-1.5 transition-colors cursor-pointer ${
-                mode === "customize_3d"
+              className={`h-9 px-2.5 rounded-xl text-xs font-bold inline-flex items-center gap-1.5 transition-colors cursor-pointer ${mode === "customize_3d"
                   ? "bg-sky-600 text-white shadow-xs"
                   : "text-slate-600 hover:bg-slate-100"
-              }`}
+                }`}
             >
               <Box className="w-4 h-4 shrink-0" />
               {mode === "customize_3d" && (
@@ -1471,15 +1769,34 @@ export default function AdminMapPage() {
 
             <button
               type="button"
+              onClick={handleGlobalUndo}
+              disabled={
+                isUndoingMap ||
+                (draftPathPoints.length === 0 &&
+                  undoStack.length === 0 &&
+                  mapUndoStack.length === 0)
+              }
+              title="ย้อนกลับ (Ctrl+Z)"
+              aria-label="ย้อนกลับ"
+              className="w-9 h-9 rounded-xl border border-slate-200 bg-slate-50 hover:bg-slate-100 disabled:opacity-35 text-slate-700 flex items-center justify-center transition-colors cursor-pointer"
+            >
+              {isUndoingMap ? (
+                <Loader2 className="w-4 h-4 animate-spin" />
+              ) : (
+                <Undo2 className="w-4 h-4" />
+              )}
+            </button>
+
+            <button
+              type="button"
               onClick={() => setModeInfoOpen((prev) => !prev)}
-              title="คำอธิบายวิธีใช้งานโหมดนี้และสถิติแผนที่"
-              aria-label="วิธีใช้งานโหมดนี้"
+              title="วิธีใช้งาน"
+              aria-label="วิธีใช้งาน"
               aria-expanded={modeInfoOpen}
-              className={`w-9 h-9 rounded-xl border text-xs font-bold flex items-center justify-center transition-colors cursor-pointer ${
-                modeInfoOpen
+              className={`w-9 h-9 rounded-xl border text-xs font-bold flex items-center justify-center transition-colors cursor-pointer ${modeInfoOpen
                   ? "bg-[#0F766E] border-[#0F766E] text-white"
                   : "border-slate-200 bg-slate-50 hover:bg-slate-100 text-slate-600"
-              }`}
+                }`}
             >
               <Info className="w-4 h-4" />
             </button>
@@ -1491,17 +1808,12 @@ export default function AdminMapPage() {
           <button
             type="button"
             onClick={handleToggleFullscreen}
-            title={
-              sidebarHidden
-                ? "แสดงแถบเมนูซ้าย (ออกจากโหมดเต็มจอ)"
-                : "ซ่อนแถบเมนูซ้ายเพื่อดูแผนที่เต็มจอ 100%"
-            }
-            aria-label={sidebarHidden ? "แสดงแถบเมนูซ้าย" : "เต็มจอ"}
-            className={`h-9 px-2.5 rounded-xl border text-xs font-bold inline-flex items-center gap-1.5 shrink-0 transition-colors cursor-pointer ${
-              sidebarHidden
+            title={sidebarHidden ? "แสดงเมนู" : "เต็มจอ"}
+            aria-label={sidebarHidden ? "แสดงเมนู" : "เต็มจอ"}
+            className={`h-9 px-2.5 rounded-xl border text-xs font-bold inline-flex items-center gap-1.5 shrink-0 transition-colors cursor-pointer ${sidebarHidden
                 ? "bg-[#0F766E] border-[#0F766E] text-white"
                 : "border-slate-200 bg-white hover:bg-slate-100 text-slate-700"
-            }`}
+              }`}
           >
             {sidebarHidden ? (
               <Minimize2 className="w-4 h-4" />
@@ -1518,20 +1830,18 @@ export default function AdminMapPage() {
         {activeVersion?.is_live && !liveWarningDismissed && (
           <div className="pointer-events-auto self-start bg-amber-50/95 backdrop-blur border border-amber-200 shadow-sm rounded-xl px-3 py-1.5 flex items-center gap-2 text-xs text-amber-900">
             <AlertTriangle className="w-3.5 h-3.5 text-amber-600 shrink-0" />
-            <span className="font-medium">
-              กำลังแก้ไขเวอร์ชันที่ใช้งานจริง แนะนำให้กดคัดลอกเป็นฉบับร่างก่อนแก้ไขเพื่อความปลอดภัย
-            </span>
+            <span className="font-medium">กำลังแก้เวอร์ชันจริง</span>
             <button
               type="button"
               onClick={handleOpenCloneModal}
               className="px-2 py-0.5 rounded-lg bg-amber-500 hover:bg-amber-600 text-white text-[11px] font-bold shrink-0 cursor-pointer"
             >
-              คัดลอกเป็นฉบับร่าง
+              คัดลอกฉบับร่าง
             </button>
             <button
               type="button"
               onClick={() => setLiveWarningDismissed(true)}
-              aria-label="ซ่อนคำเตือน"
+              aria-label="ปิด"
               className="w-5 h-5 rounded hover:bg-amber-200/70 text-amber-800 flex items-center justify-center shrink-0 cursor-pointer"
             >
               <X className="w-3.5 h-3.5" />
@@ -1539,17 +1849,17 @@ export default function AdminMapPage() {
           </div>
         )}
 
-        {/* Mode Usage Info Popover (triggered by [ ! ] button) */}
+        {/* Mode Usage Info Popover */}
         {modeInfoOpen && (
           <div className="pointer-events-auto self-center max-w-md bg-white/98 backdrop-blur border border-slate-200 shadow-xl rounded-2xl p-3.5 space-y-2 text-xs">
             <div className="flex items-center justify-between gap-2">
               <span className="font-bold text-[#0F172A]">
-                โหมดปัจจุบัน: {modeLabel[mode]}
+                {modeLabel[mode]}
               </span>
               <button
                 type="button"
                 onClick={() => setModeInfoOpen(false)}
-                aria-label="ปิดคำอธิบาย"
+                aria-label="ปิด"
                 className="w-6 h-6 rounded-lg hover:bg-slate-100 text-slate-400 flex items-center justify-center cursor-pointer"
               >
                 <X className="w-3.5 h-3.5" />
@@ -1557,12 +1867,27 @@ export default function AdminMapPage() {
             </div>
             <p className="text-slate-600 leading-relaxed">{modeHint[mode]}</p>
             <div className="pt-2 border-t border-slate-100 flex flex-wrap items-center gap-3 text-[11px] font-semibold text-slate-500">
-              <span>{nodes.length} จุด ({buildingCount} อาคาร)</span>
+              <span>{nodes.length} จุด ({buildingCount} ตึก)</span>
               <span>•</span>
-              <span>{edges.length} เส้นเชื่อม ({closedEdgeCount} ปิดชั่วคราว)</span>
+              <span>{edges.length} เส้น ({closedEdgeCount} ปิด)</span>
               <span>•</span>
-              <span>{surveys.length} รอยเดินสำรวจ</span>
+              <span>{surveys.length} รอยเดิน</span>
             </div>
+          </div>
+        )}
+
+        {/* Placement Mode Active Banner */}
+        {mode === "customize_3d" && clickToPlace3D && (
+          <div className="pointer-events-auto self-center bg-sky-600 text-white shadow-lg rounded-xl px-3.5 py-2 flex items-center gap-2.5 text-xs font-bold">
+            <Box className="w-4 h-4 shrink-0" />
+            <span>คลิกวางบนแผนที่ (Esc ยกเลิก)</span>
+            <button
+              type="button"
+              onClick={() => setClickToPlace3D(false)}
+              className="px-2 py-0.5 rounded-lg bg-white/20 hover:bg-white/30 text-white text-[11px] cursor-pointer"
+            >
+              ยกเลิก
+            </button>
           </div>
         )}
 
@@ -1580,6 +1905,90 @@ export default function AdminMapPage() {
             >
               ยกเลิก
             </button>
+          </div>
+        )}
+
+        {/* Floating Freeform Draw Path Bar */}
+        {mode === "draw_path" && (
+          <div className="pointer-events-auto self-start bg-white/95 backdrop-blur border border-orange-200 shadow-md rounded-xl px-3 py-2 flex flex-wrap items-center gap-2.5">
+            <span className="text-xs font-bold text-orange-600 inline-flex items-center gap-1.5">
+              <PenTool className="w-3.5 h-3.5" />
+              <span>
+                วาดเส้นอิสระ ({draftPathPoints.length} จุด)
+              </span>
+            </span>
+            <input
+              type="text"
+              value={edgeInstruction}
+              onChange={(e) => setEdgeInstruction(e.target.value)}
+              placeholder="คำอธิบายทางเดิน (ไม่บังคับ)"
+              className="h-8 px-2.5 rounded-lg bg-slate-50 border border-slate-200 text-xs text-[#0F172A] w-40 focus:outline-none focus:border-orange-500"
+            />
+            <label className="inline-flex items-center gap-1 text-xs font-semibold text-slate-700 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={edgeWheelchair}
+                onChange={(e) => setEdgeWheelchair(e.target.checked)}
+                className="w-3.5 h-3.5 accent-[#0F766E]"
+              />
+              <Accessibility className="w-3.5 h-3.5 text-[#0F766E]" />
+              <span>รถเข็น</span>
+            </label>
+            <label className="inline-flex items-center gap-1 text-xs font-semibold text-slate-700 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={edgeCovered}
+                onChange={(e) => setEdgeCovered(e.target.checked)}
+                className="w-3.5 h-3.5 accent-sky-600"
+              />
+              <Umbrella className="w-3.5 h-3.5 text-sky-600" />
+              <span>มีหลังคา</span>
+            </label>
+            <label className="inline-flex items-center gap-1 text-xs font-semibold text-slate-700 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={edgeIndoor}
+                onChange={(e) => setEdgeIndoor(e.target.checked)}
+                className="w-3.5 h-3.5 accent-violet-600"
+              />
+              <Building2 className="w-3.5 h-3.5 text-violet-600" />
+              <span>ทะลุอาคาร</span>
+            </label>
+
+            <div className="flex items-center gap-1.5 ml-auto">
+              <button
+                type="button"
+                disabled={draftPathPoints.length === 0 || isSavingDraftPath}
+                onClick={() =>
+                  setDraftPathPoints((prev) => prev.slice(0, -1))
+                }
+                className="h-8 px-2.5 rounded-lg border border-slate-200 bg-slate-50 hover:bg-slate-100 disabled:opacity-40 text-xs font-bold text-slate-700 inline-flex items-center gap-1 cursor-pointer"
+              >
+                <Undo2 className="w-3.5 h-3.5" />
+                <span>ย้อน 1 จุด</span>
+              </button>
+              <button
+                type="button"
+                disabled={draftPathPoints.length === 0 || isSavingDraftPath}
+                onClick={() => setDraftPathPoints([])}
+                className="h-8 px-2.5 rounded-lg border border-rose-200 bg-rose-50 hover:bg-rose-100 disabled:opacity-40 text-xs font-bold text-[#BE123C] cursor-pointer"
+              >
+                ล้าง
+              </button>
+              <button
+                type="button"
+                disabled={draftPathPoints.length < 2 || isSavingDraftPath}
+                onClick={handleSaveDraftPath}
+                className="h-8 px-3 rounded-lg bg-[#0F766E] hover:bg-[#115E59] disabled:opacity-50 text-white text-xs font-bold inline-flex items-center gap-1.5 cursor-pointer"
+              >
+                {isSavingDraftPath ? (
+                  <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                ) : (
+                  <Save className="w-3.5 h-3.5" />
+                )}
+                <span>บันทึกเส้นทาง</span>
+              </button>
+            </div>
           </div>
         )}
 
@@ -1690,659 +2099,639 @@ export default function AdminMapPage() {
             </div>
           </div>
 
-            <div className="flex-1 overflow-y-auto p-4 space-y-4">
-              {/* Rooftop Alignment Helper: Satellite Underlay Toggle + 3D Block Opacity */}
-              <div className="rounded-xl border border-slate-200 bg-slate-50 p-3 space-y-2.5">
-                <div className="flex items-center justify-between gap-2">
-                  <span className="text-xs font-bold text-slate-700">
-                    ตัวช่วยจัดวางให้ตรงพื้นที่จริง
+          <div className="flex-1 overflow-y-auto p-4 space-y-4">
+            {/* Satellite Underlay & Block Opacity */}
+            <div className="rounded-xl border border-slate-200 bg-slate-50 p-3 space-y-2.5">
+              <div className="flex items-center justify-between gap-2">
+                <span className="text-xs font-bold text-slate-700">
+                  การแสดงผล
+                </span>
+                <button
+                  type="button"
+                  onClick={() =>
+                    setShowSatelliteUnderlay((prev) => {
+                      const next = !prev;
+                      if (next && buildingOpacity > 0.75) {
+                        setBuildingOpacity(0.55);
+                      } else if (!next && buildingOpacity < 0.75) {
+                        setBuildingOpacity(0.92);
+                      }
+                      return next;
+                    })
+                  }
+                  className={`min-h-[32px] px-2.5 rounded-lg border text-xs font-bold inline-flex items-center gap-1.5 transition-colors cursor-pointer ${showSatelliteUnderlay
+                      ? "bg-[#0F766E] border-[#0F766E] text-white"
+                      : "bg-white border-slate-200 text-slate-700 hover:bg-teal-50"
+                    }`}
+                >
+                  <Globe className="w-3.5 h-3.5" />
+                  <span>ดาวเทียม</span>
+                </button>
+              </div>
+
+              <div className="space-y-1">
+                <div className="flex items-center justify-between text-[11px] font-semibold text-slate-600">
+                  <span>ความทึบแสง</span>
+                  <span className="tabular-nums font-bold text-slate-800">
+                    {Math.round(buildingOpacity * 100)}%
                   </span>
-                  <button
-                    type="button"
-                    onClick={() =>
-                      setShowSatelliteUnderlay((prev) => {
-                        const next = !prev;
-                        if (next && buildingOpacity > 0.75) {
-                          setBuildingOpacity(0.55);
-                        } else if (!next && buildingOpacity < 0.75) {
-                          setBuildingOpacity(0.92);
-                        }
-                        return next;
+                </div>
+                <input
+                  type="range"
+                  min={20}
+                  max={100}
+                  step={5}
+                  value={Math.round(buildingOpacity * 100)}
+                  onChange={(e) =>
+                    setBuildingOpacity(Number(e.target.value) / 100)
+                  }
+                  className="w-full accent-[#0F766E] cursor-pointer"
+                />
+              </div>
+            </div>
+
+            {/* Unified Placement Mode Button (Block Icon) */}
+            <button
+              type="button"
+              onClick={() => {
+                setClickToMove3D(false);
+                setClickToPlace3D((prev) => !prev);
+              }}
+              className={`w-full min-h-[42px] px-3 rounded-xl border text-xs font-bold inline-flex items-center justify-center gap-2 transition-colors cursor-pointer ${clickToPlace3D
+                  ? "bg-sky-600 border-sky-700 text-white shadow-sm"
+                  : "border-teal-200 bg-teal-50 hover:bg-teal-100 text-[#0F766E]"
+                }`}
+            >
+              <Box className="w-4 h-4 shrink-0" />
+              <span>
+                {clickToPlace3D ? "คลิกวางบนแผนที่..." : "เพิ่มบล็อก 3D"}
+              </span>
+            </button>
+
+            {!selected3D ? (
+              <div className="rounded-2xl border border-dashed border-slate-300 bg-slate-50 p-5 text-center space-y-1.5">
+                <Box className="w-7 h-7 text-slate-400 mx-auto" />
+                <p className="text-xs font-bold text-slate-600">
+                  คลิกเลือกบล็อกบนแผนที่เพื่อแก้ไข
+                </p>
+              </div>
+            ) : (
+              <div className="space-y-4">
+                {/* Selected Building Title, Wing Checkbox, Duplicate & Skybridge Quick Actions */}
+                <div className="rounded-xl bg-sky-50/70 border border-sky-200 p-3 space-y-2.5">
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-[11px] font-bold uppercase tracking-wide text-sky-700">
+                      {selected3DIsCustom
+                        ? "บล็อก 3D ที่สร้างเอง"
+                        : "บล็อก 3D ที่เลือก"}
+                    </span>
+                    <span className="text-[11px] font-mono text-slate-500 truncate max-w-[140px]">
+                      {selected3D.id}
+                    </span>
+                  </div>
+
+                  <input
+                    type="text"
+                    value={selected3D.short_name ?? ""}
+                    onChange={(e) =>
+                      updateSelected3DField({
+                        short_name: e.target.value,
+                        name: e.target.value || selected3D.name,
                       })
                     }
-                    className={`min-h-[32px] px-2.5 rounded-lg border text-xs font-bold inline-flex items-center gap-1.5 transition-colors cursor-pointer ${
-                      showSatelliteUnderlay
-                        ? "bg-[#0F766E] border-[#0F766E] text-white"
-                        : "bg-white border-slate-200 text-slate-700 hover:bg-teal-50"
-                    }`}
-                  >
-                    <Globe className="w-3.5 h-3.5" />
-                    <span>พื้นหลังดาวเทียม</span>
-                  </button>
+                    placeholder="ชื่อป้ายบนแผนที่ (เว้นว่างถ้าเป็นปีกยื่น)"
+                    className="w-full min-h-[38px] px-3 rounded-lg bg-white border border-slate-200 text-xs font-semibold text-[#0F172A] focus:outline-none focus:border-sky-500"
+                  />
+
+                  {/* Bind to existing Building Node ID */}
+                  <div className="space-y-1">
+                    <label
+                      htmlFor="link-node-select"
+                      className="flex items-center gap-1 text-[11px] font-bold text-slate-600"
+                    >
+                      <Link2 className="w-3.5 h-3.5 text-[#0F766E]" />
+                      <span>ผูกกับอาคารในระบบนำทาง (node_id)</span>
+                    </label>
+                    <select
+                      id="link-node-select"
+                      value={
+                        selected3D.linked_node_id
+                          ? String(selected3D.linked_node_id)
+                          : ""
+                      }
+                      onChange={(e) => {
+                        const val = e.target.value
+                          ? Number(e.target.value)
+                          : null;
+                        updateSelected3DField(
+                          { linked_node_id: val },
+                          undefined,
+                          true
+                        );
+                      }}
+                      className="w-full min-h-[36px] px-2.5 rounded-lg bg-white border border-slate-200 text-xs font-semibold text-slate-700 focus:outline-none focus:border-sky-500"
+                    >
+                      <option value="">-- จับคู่อัตโนมัติตามพิกัด --</option>
+                      {nodes
+                        .filter((n) => n.is_building)
+                        .map((b) => (
+                          <option key={`link-bldg-${b.id}`} value={String(b.id)}>
+                            #{b.id} {b.name}
+                          </option>
+                        ))}
+                    </select>
+                  </div>
+
+                  {selected3DIsCustom && (
+                    <label className="inline-flex items-center gap-2 text-xs font-semibold text-slate-700 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={selected3DIsWing}
+                        onChange={(e) =>
+                          updateSelected3DField({}, e.target.checked, true)
+                        }
+                        className="w-4 h-4 accent-sky-600"
+                      />
+                      <span>เป็นส่วนยื่นของอาคาร (ไม่แสดงป้ายชื่อซ้ำ)</span>
+                    </label>
+                  )}
+
+                  {/* Quick Duplicate / Add Wing / Skybridge */}
+                  <div className="grid grid-cols-3 gap-1.5 pt-1">
+                    <button
+                      type="button"
+                      onClick={handleDuplicateSelected3D}
+                      className="min-h-[34px] px-2 rounded-lg bg-white border border-sky-200 hover:bg-sky-100 text-sky-800 text-[11px] font-bold inline-flex items-center justify-center gap-1 cursor-pointer"
+                    >
+                      <Copy className="w-3.5 h-3.5 shrink-0" />
+                      <span>คัดลอก</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => handleAddBlock3D(true)}
+                      className="min-h-[34px] px-2 rounded-lg bg-white border border-sky-200 hover:bg-sky-100 text-sky-800 text-[11px] font-bold inline-flex items-center justify-center gap-1 cursor-pointer"
+                    >
+                      <CopyPlus className="w-3.5 h-3.5 shrink-0" />
+                      <span>เพิ่มปีกยื่น</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() =>
+                        updateSelected3DField(
+                          { base_height: 4, height: 8 },
+                          undefined,
+                          true
+                        )
+                      }
+                      title="ตั้งค่าระดับฐานยกลอยจากพื้น 4 ม. สำหรับทำทางเชื่อมลอยฟ้า"
+                      className="min-h-[34px] px-2 rounded-lg bg-white border border-amber-200 hover:bg-amber-50 text-amber-800 text-[11px] font-bold inline-flex items-center justify-center cursor-pointer"
+                    >
+                      <span>ทางเชื่อมลอยฟ้า</span>
+                    </button>
+                  </div>
                 </div>
 
+                {/* Width (Stretch X) */}
                 <div className="space-y-1">
-                  <div className="flex items-center justify-between text-[11px] font-semibold text-slate-600">
-                    <span>ความทึบแสงบล็อก 3D (สำหรับทาบหลังคา)</span>
-                    <span className="tabular-nums font-bold text-slate-800">
-                      {Math.round(buildingOpacity * 100)}%
+                  <div className="flex items-center justify-between text-xs font-bold text-slate-700">
+                    <span>ความกว้าง (ยืด-หดซ้ายขวา)</span>
+                    <span className="tabular-nums text-sky-700">
+                      {selected3D.width_m} ม.
                     </span>
                   </div>
                   <input
                     type="range"
-                    min={20}
-                    max={100}
-                    step={5}
-                    value={Math.round(buildingOpacity * 100)}
+                    min={3}
+                    max={160}
+                    step={0.5}
+                    value={selected3D.width_m}
+                    onPointerDown={pushUndoSnapshot}
                     onChange={(e) =>
-                      setBuildingOpacity(Number(e.target.value) / 100)
+                      updateSelected3DField({ width_m: Number(e.target.value) })
                     }
-                    className="w-full accent-[#0F766E] cursor-pointer"
+                    className="w-full accent-sky-600 cursor-pointer"
                   />
                 </div>
-              </div>
 
-              {/* Add / Click-to-Place / Add Wing Controls */}
-              <div className="grid grid-cols-2 gap-2">
-                <button
-                  type="button"
-                  onClick={() => handleAddBlock3D(false)}
-                  className="min-h-[38px] px-2.5 rounded-xl border border-teal-200 bg-teal-50 hover:bg-teal-100 text-[#0F766E] text-xs font-bold inline-flex items-center justify-center gap-1.5 cursor-pointer"
-                >
-                  <Plus className="w-4 h-4 shrink-0" />
-                  <span>เพิ่มบล็อก 3D ใหม่</span>
-                </button>
-                <button
-                  type="button"
-                  onClick={() => {
-                    setClickToMove3D(false);
-                    setClickToPlace3D((prev) => !prev);
-                  }}
-                  className={`min-h-[38px] px-2.5 rounded-xl border text-xs font-bold inline-flex items-center justify-center gap-1.5 cursor-pointer ${
-                    clickToPlace3D
-                      ? "bg-amber-500 border-amber-600 text-white"
-                      : "border-sky-200 bg-sky-50 hover:bg-sky-100 text-sky-800"
-                  }`}
-                >
-                  <MapPin className="w-3.5 h-3.5 shrink-0" />
-                  <span>{clickToPlace3D ? "คลิกจุดวางบนแมพ..." : "คลิกวางบนแผนที่"}</span>
-                </button>
-              </div>
-
-              {!selected3D ? (
-                <div className="rounded-2xl border border-dashed border-slate-300 bg-slate-50 p-5 text-center space-y-2">
-                  <Box className="w-8 h-8 text-slate-400 mx-auto" />
-                  <p className="text-sm font-bold text-slate-700">
-                    คลิกเลือกบล็อกบนแผนที่ 3D
-                  </p>
-                  <p className="text-xs text-slate-500 leading-relaxed">
-                    คลิกเลือกอาคารใดก็ได้เพื่อแสดงจุดจับลากย้าย (สีฟ้า), จุดยืด-หด 4 ด้าน, จุดหมุน (สีเขียว) หรือคัดลอกต่อเป็นตึกรูปตัว L/U และทางเชื่อมลอยฟ้า
-                  </p>
+                {/* Depth (Stretch Y / Extrude Wing) */}
+                <div className="space-y-1">
+                  <div className="flex items-center justify-between text-xs font-bold text-slate-700">
+                    <span>ความยาว / ลึก (ยื่นหน้า-หลัง)</span>
+                    <span className="tabular-nums text-sky-700">
+                      {selected3D.depth_m} ม.
+                    </span>
+                  </div>
+                  <input
+                    type="range"
+                    min={3}
+                    max={160}
+                    step={0.5}
+                    value={selected3D.depth_m}
+                    onPointerDown={pushUndoSnapshot}
+                    onChange={(e) =>
+                      updateSelected3DField({ depth_m: Number(e.target.value) })
+                    }
+                    className="w-full accent-sky-600 cursor-pointer"
+                  />
                 </div>
-              ) : (
-                <div className="space-y-4">
-                  {/* Selected Building Title, Wing Checkbox, Duplicate & Skybridge Quick Actions */}
-                  <div className="rounded-xl bg-sky-50/70 border border-sky-200 p-3 space-y-2.5">
-                    <div className="flex items-center justify-between gap-2">
-                      <span className="text-[11px] font-bold uppercase tracking-wide text-sky-700">
-                        {selected3DIsCustom
-                          ? "บล็อก 3D ที่สร้างเอง"
-                          : "บล็อก 3D ที่เลือก"}
-                      </span>
-                      <span className="text-[11px] font-mono text-slate-500 truncate max-w-[140px]">
-                        {selected3D.id}
+
+                {/* Height & Base Height */}
+                <div className="grid grid-cols-2 gap-3">
+                  <div className="space-y-1">
+                    <div className="flex items-center justify-between text-xs font-bold text-slate-700">
+                      <span>ความสูง</span>
+                      <span className="tabular-nums text-sky-700">
+                        {Math.round(selected3D.height)} ม.
                       </span>
                     </div>
-
                     <input
-                      type="text"
-                      value={selected3D.short_name ?? ""}
+                      type="range"
+                      min={3}
+                      max={60}
+                      step={1}
+                      value={Math.round(selected3D.height)}
+                      onPointerDown={pushUndoSnapshot}
+                      onChange={(e) =>
+                        updateSelected3DField({ height: Number(e.target.value) })
+                      }
+                      className="w-full accent-sky-600 cursor-pointer"
+                    />
+                  </div>
+                  <div className="space-y-1">
+                    <div className="flex items-center justify-between text-xs font-bold text-slate-700">
+                      <span>ระดับฐาน</span>
+                      <span className="tabular-nums text-sky-700">
+                        {Math.round(selected3D.base_height)} ม.
+                      </span>
+                    </div>
+                    <input
+                      type="range"
+                      min={0}
+                      max={45}
+                      step={1}
+                      value={Math.round(selected3D.base_height)}
+                      onPointerDown={pushUndoSnapshot}
                       onChange={(e) =>
                         updateSelected3DField({
-                          short_name: e.target.value,
-                          name: e.target.value || selected3D.name,
+                          base_height: Number(e.target.value),
                         })
                       }
-                      placeholder="ชื่อป้ายบนแผนที่ (เว้นว่างถ้าเป็นปีกยื่น)"
-                      className="w-full min-h-[38px] px-3 rounded-lg bg-white border border-slate-200 text-xs font-semibold text-[#0F172A] focus:outline-none focus:border-sky-500"
+                      className="w-full accent-sky-600 cursor-pointer"
                     />
+                  </div>
+                </div>
 
-                    {/* Bind to existing Building Node ID */}
-                    <div className="space-y-1">
-                      <label
-                        htmlFor="link-node-select"
-                        className="flex items-center gap-1 text-[11px] font-bold text-slate-600"
-                      >
-                        <Link2 className="w-3.5 h-3.5 text-[#0F766E]" />
-                        <span>ผูกกับอาคารในระบบนำทาง (node_id)</span>
-                      </label>
-                      <select
-                        id="link-node-select"
-                        value={
-                          selected3D.linked_node_id
-                            ? String(selected3D.linked_node_id)
-                            : ""
-                        }
-                        onChange={(e) => {
-                          const val = e.target.value
-                            ? Number(e.target.value)
-                            : null;
-                          updateSelected3DField(
-                            { linked_node_id: val },
-                            undefined,
-                            true
-                          );
-                        }}
-                        className="w-full min-h-[36px] px-2.5 rounded-lg bg-white border border-slate-200 text-xs font-semibold text-slate-700 focus:outline-none focus:border-sky-500"
-                      >
-                        <option value="">-- จับคู่อัตโนมัติตามพิกัด --</option>
-                        {nodes
-                          .filter((n) => n.is_building)
-                          .map((b) => (
-                            <option key={`link-bldg-${b.id}`} value={String(b.id)}>
-                              #{b.id} {b.name}
-                            </option>
-                          ))}
-                      </select>
+                {/* Rotation Angle */}
+                <div className="space-y-1">
+                  <div className="flex items-center justify-between text-xs font-bold text-slate-700">
+                    <span>มุมหมุนอาคาร</span>
+                    <span className="tabular-nums text-sky-700">
+                      {Math.round(selected3D.angle_deg)}°
+                    </span>
+                  </div>
+                  <input
+                    type="range"
+                    min={-180}
+                    max={180}
+                    step={1}
+                    value={Math.round(selected3D.angle_deg)}
+                    onPointerDown={pushUndoSnapshot}
+                    onChange={(e) =>
+                      updateSelected3DField({ angle_deg: Number(e.target.value) })
+                    }
+                    className="w-full accent-sky-600 cursor-pointer"
+                  />
+                </div>
+
+                {/* Fine Position Nudge (0.5m / 1m / 2m) & Click-to-Move */}
+                <div className="space-y-2">
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-xs font-bold text-slate-700">
+                      ขยับตำแหน่งละเอียด
+                    </span>
+                    <div className="inline-flex rounded-lg bg-slate-100 p-0.5">
+                      {[0.5, 1, 2].map((step) => (
+                        <button
+                          key={`nudge-${step}`}
+                          type="button"
+                          onClick={() => setNudgeStepM(step)}
+                          className={`px-2 py-0.5 rounded-md text-[11px] font-bold cursor-pointer ${nudgeStepM === step
+                              ? "bg-sky-600 text-white"
+                              : "text-slate-600 hover:bg-white"
+                            }`}
+                        >
+                          {step} ม.
+                        </button>
+                      ))}
                     </div>
+                  </div>
+                  <div className="grid grid-cols-4 gap-1.5">
+                    <button
+                      type="button"
+                      onClick={() => nudgeSelected3D(nudgeStepM, 0)}
+                      className="min-h-[36px] rounded-lg border border-slate-200 hover:bg-slate-100 text-slate-700 flex items-center justify-center cursor-pointer"
+                      title={`เลื่อนขึ้นเหนือ ${nudgeStepM} ม.`}
+                    >
+                      <ArrowUp className="w-4 h-4" />
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => nudgeSelected3D(-nudgeStepM, 0)}
+                      className="min-h-[36px] rounded-lg border border-slate-200 hover:bg-slate-100 text-slate-700 flex items-center justify-center cursor-pointer"
+                      title={`เลื่อนลงใต้ ${nudgeStepM} ม.`}
+                    >
+                      <ArrowDown className="w-4 h-4" />
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => nudgeSelected3D(0, -nudgeStepM)}
+                      className="min-h-[36px] rounded-lg border border-slate-200 hover:bg-slate-100 text-slate-700 flex items-center justify-center cursor-pointer"
+                      title={`เลื่อนซ้ายตะวันตก ${nudgeStepM} ม.`}
+                    >
+                      <ArrowLeft className="w-4 h-4" />
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => nudgeSelected3D(0, nudgeStepM)}
+                      className="min-h-[36px] rounded-lg border border-slate-200 hover:bg-slate-100 text-slate-700 flex items-center justify-center cursor-pointer"
+                      title={`เลื่อนขวาตะวันออก ${nudgeStepM} ม.`}
+                    >
+                      <ArrowRight className="w-4 h-4" />
+                    </button>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setClickToPlace3D(false);
+                      setClickToMove3D((prev) => !prev);
+                    }}
+                    className={`w-full min-h-[34px] px-2.5 rounded-lg text-xs font-bold border cursor-pointer ${clickToMove3D
+                        ? "bg-amber-500 border-amber-600 text-white"
+                        : "bg-white border-slate-200 text-slate-700 hover:bg-slate-50"
+                      }`}
+                  >
+                    {clickToMove3D
+                      ? "คลิกบนแผนที่เพื่อย้ายมาวางจุดนั้น..."
+                      : "คลิกบนแผนที่เพื่อย้ายจุดกึ่งกลาง"}
+                  </button>
+                </div>
 
-                    {selected3DIsCustom && (
-                      <label className="inline-flex items-center gap-2 text-xs font-semibold text-slate-700 cursor-pointer">
-                        <input
-                          type="checkbox"
-                          checked={selected3DIsWing}
-                          onChange={(e) =>
-                            updateSelected3DField({}, e.target.checked, true)
-                          }
-                          className="w-4 h-4 accent-sky-600"
-                        />
-                        <span>เป็นส่วนยื่นของอาคาร (ไม่แสดงป้ายชื่อซ้ำ)</span>
-                      </label>
-                    )}
-
-                    {/* Quick Duplicate / Add Wing / Skybridge */}
-                    <div className="grid grid-cols-3 gap-1.5 pt-1">
+                {/* Wall Map Color Presets + Color Picker */}
+                <div className="space-y-2">
+                  <div className="flex items-center justify-between text-xs font-bold text-slate-700">
+                    <span>สีบล็อก (โทนสีแผนผัง รพ.)</span>
+                    <input
+                      type="color"
+                      value={selected3D.color || "#E2E8F0"}
+                      onClick={pushUndoSnapshot}
+                      onChange={(e) =>
+                        updateSelected3DField({ color: e.target.value })
+                      }
+                      className="w-7 h-6 rounded border border-slate-200 cursor-pointer"
+                      aria-label="เลือกสีบล็อกอิสระ"
+                    />
+                  </div>
+                  <div className="grid grid-cols-6 gap-1.5">
+                    {WALL_MAP_COLOR_PRESETS.map((preset) => (
                       <button
-                        type="button"
-                        onClick={handleDuplicateSelected3D}
-                        className="min-h-[34px] px-2 rounded-lg bg-white border border-sky-200 hover:bg-sky-100 text-sky-800 text-[11px] font-bold inline-flex items-center justify-center gap-1 cursor-pointer"
-                      >
-                        <Copy className="w-3.5 h-3.5 shrink-0" />
-                        <span>คัดลอก</span>
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => handleAddBlock3D(true)}
-                        className="min-h-[34px] px-2 rounded-lg bg-white border border-sky-200 hover:bg-sky-100 text-sky-800 text-[11px] font-bold inline-flex items-center justify-center gap-1 cursor-pointer"
-                      >
-                        <CopyPlus className="w-3.5 h-3.5 shrink-0" />
-                        <span>เพิ่มปีกยื่น</span>
-                      </button>
-                      <button
+                        key={preset.color}
                         type="button"
                         onClick={() =>
                           updateSelected3DField(
-                            { base_height: 4, height: 8 },
+                            { color: preset.color },
                             undefined,
                             true
                           )
                         }
-                        title="ตั้งค่าระดับฐานยกลอยจากพื้น 4 ม. สำหรับทำทางเชื่อมลอยฟ้า"
-                        className="min-h-[34px] px-2 rounded-lg bg-white border border-amber-200 hover:bg-amber-50 text-amber-800 text-[11px] font-bold inline-flex items-center justify-center cursor-pointer"
-                      >
-                        <span>ทางเชื่อมลอยฟ้า</span>
-                      </button>
-                    </div>
-                  </div>
-
-                  {/* Width (Stretch X) */}
-                  <div className="space-y-1">
-                    <div className="flex items-center justify-between text-xs font-bold text-slate-700">
-                      <span>ความกว้าง (ยืด-หดซ้ายขวา)</span>
-                      <span className="tabular-nums text-sky-700">
-                        {selected3D.width_m} ม.
-                      </span>
-                    </div>
-                    <input
-                      type="range"
-                      min={3}
-                      max={160}
-                      step={0.5}
-                      value={selected3D.width_m}
-                      onPointerDown={pushUndoSnapshot}
-                      onChange={(e) =>
-                        updateSelected3DField({ width_m: Number(e.target.value) })
-                      }
-                      className="w-full accent-sky-600 cursor-pointer"
-                    />
-                  </div>
-
-                  {/* Depth (Stretch Y / Extrude Wing) */}
-                  <div className="space-y-1">
-                    <div className="flex items-center justify-between text-xs font-bold text-slate-700">
-                      <span>ความยาว / ลึก (ยื่นหน้า-หลัง)</span>
-                      <span className="tabular-nums text-sky-700">
-                        {selected3D.depth_m} ม.
-                      </span>
-                    </div>
-                    <input
-                      type="range"
-                      min={3}
-                      max={160}
-                      step={0.5}
-                      value={selected3D.depth_m}
-                      onPointerDown={pushUndoSnapshot}
-                      onChange={(e) =>
-                        updateSelected3DField({ depth_m: Number(e.target.value) })
-                      }
-                      className="w-full accent-sky-600 cursor-pointer"
-                    />
-                  </div>
-
-                  {/* Height & Base Height */}
-                  <div className="grid grid-cols-2 gap-3">
-                    <div className="space-y-1">
-                      <div className="flex items-center justify-between text-xs font-bold text-slate-700">
-                        <span>ความสูง</span>
-                        <span className="tabular-nums text-sky-700">
-                          {Math.round(selected3D.height)} ม.
-                        </span>
-                      </div>
-                      <input
-                        type="range"
-                        min={3}
-                        max={60}
-                        step={1}
-                        value={Math.round(selected3D.height)}
-                        onPointerDown={pushUndoSnapshot}
-                        onChange={(e) =>
-                          updateSelected3DField({ height: Number(e.target.value) })
-                        }
-                        className="w-full accent-sky-600 cursor-pointer"
-                      />
-                    </div>
-                    <div className="space-y-1">
-                      <div className="flex items-center justify-between text-xs font-bold text-slate-700">
-                        <span>ระดับฐาน</span>
-                        <span className="tabular-nums text-sky-700">
-                          {Math.round(selected3D.base_height)} ม.
-                        </span>
-                      </div>
-                      <input
-                        type="range"
-                        min={0}
-                        max={45}
-                        step={1}
-                        value={Math.round(selected3D.base_height)}
-                        onPointerDown={pushUndoSnapshot}
-                        onChange={(e) =>
-                          updateSelected3DField({
-                            base_height: Number(e.target.value),
-                          })
-                        }
-                        className="w-full accent-sky-600 cursor-pointer"
-                      />
-                    </div>
-                  </div>
-
-                  {/* Rotation Angle */}
-                  <div className="space-y-1">
-                    <div className="flex items-center justify-between text-xs font-bold text-slate-700">
-                      <span>มุมหมุนอาคาร</span>
-                      <span className="tabular-nums text-sky-700">
-                        {Math.round(selected3D.angle_deg)}°
-                      </span>
-                    </div>
-                    <input
-                      type="range"
-                      min={-180}
-                      max={180}
-                      step={1}
-                      value={Math.round(selected3D.angle_deg)}
-                      onPointerDown={pushUndoSnapshot}
-                      onChange={(e) =>
-                        updateSelected3DField({ angle_deg: Number(e.target.value) })
-                      }
-                      className="w-full accent-sky-600 cursor-pointer"
-                    />
-                  </div>
-
-                  {/* Fine Position Nudge (0.5m / 1m / 2m) & Click-to-Move */}
-                  <div className="space-y-2">
-                    <div className="flex items-center justify-between gap-2">
-                      <span className="text-xs font-bold text-slate-700">
-                        ขยับตำแหน่งละเอียด
-                      </span>
-                      <div className="inline-flex rounded-lg bg-slate-100 p-0.5">
-                        {[0.5, 1, 2].map((step) => (
-                          <button
-                            key={`nudge-${step}`}
-                            type="button"
-                            onClick={() => setNudgeStepM(step)}
-                            className={`px-2 py-0.5 rounded-md text-[11px] font-bold cursor-pointer ${
-                              nudgeStepM === step
-                                ? "bg-sky-600 text-white"
-                                : "text-slate-600 hover:bg-white"
-                            }`}
-                          >
-                            {step} ม.
-                          </button>
-                        ))}
-                      </div>
-                    </div>
-                    <div className="grid grid-cols-4 gap-1.5">
-                      <button
-                        type="button"
-                        onClick={() => nudgeSelected3D(nudgeStepM, 0)}
-                        className="min-h-[36px] rounded-lg border border-slate-200 hover:bg-slate-100 text-slate-700 flex items-center justify-center cursor-pointer"
-                        title={`เลื่อนขึ้นเหนือ ${nudgeStepM} ม.`}
-                      >
-                        <ArrowUp className="w-4 h-4" />
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => nudgeSelected3D(-nudgeStepM, 0)}
-                        className="min-h-[36px] rounded-lg border border-slate-200 hover:bg-slate-100 text-slate-700 flex items-center justify-center cursor-pointer"
-                        title={`เลื่อนลงใต้ ${nudgeStepM} ม.`}
-                      >
-                        <ArrowDown className="w-4 h-4" />
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => nudgeSelected3D(0, -nudgeStepM)}
-                        className="min-h-[36px] rounded-lg border border-slate-200 hover:bg-slate-100 text-slate-700 flex items-center justify-center cursor-pointer"
-                        title={`เลื่อนซ้ายตะวันตก ${nudgeStepM} ม.`}
-                      >
-                        <ArrowLeft className="w-4 h-4" />
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => nudgeSelected3D(0, nudgeStepM)}
-                        className="min-h-[36px] rounded-lg border border-slate-200 hover:bg-slate-100 text-slate-700 flex items-center justify-center cursor-pointer"
-                        title={`เลื่อนขวาตะวันออก ${nudgeStepM} ม.`}
-                      >
-                        <ArrowRight className="w-4 h-4" />
-                      </button>
-                    </div>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setClickToPlace3D(false);
-                        setClickToMove3D((prev) => !prev);
-                      }}
-                      className={`w-full min-h-[34px] px-2.5 rounded-lg text-xs font-bold border cursor-pointer ${
-                        clickToMove3D
-                          ? "bg-amber-500 border-amber-600 text-white"
-                          : "bg-white border-slate-200 text-slate-700 hover:bg-slate-50"
-                      }`}
-                    >
-                      {clickToMove3D
-                        ? "คลิกบนแผนที่เพื่อย้ายมาวางจุดนั้น..."
-                        : "คลิกบนแผนที่เพื่อย้ายจุดกึ่งกลาง"}
-                    </button>
-                  </div>
-
-                  {/* Wall Map Color Presets + Color Picker */}
-                  <div className="space-y-2">
-                    <div className="flex items-center justify-between text-xs font-bold text-slate-700">
-                      <span>สีบล็อก (โทนสีแผนผัง รพ.)</span>
-                      <input
-                        type="color"
-                        value={selected3D.color || "#E2E8F0"}
-                        onClick={pushUndoSnapshot}
-                        onChange={(e) =>
-                          updateSelected3DField({ color: e.target.value })
-                        }
-                        className="w-7 h-6 rounded border border-slate-200 cursor-pointer"
-                        aria-label="เลือกสีบล็อกอิสระ"
-                      />
-                    </div>
-                    <div className="grid grid-cols-6 gap-1.5">
-                      {WALL_MAP_COLOR_PRESETS.map((preset) => (
-                        <button
-                          key={preset.color}
-                          type="button"
-                          onClick={() =>
-                            updateSelected3DField(
-                              { color: preset.color },
-                              undefined,
-                              true
-                            )
-                          }
-                          title={preset.label}
-                          className={`h-7 rounded-lg border-2 cursor-pointer transition-transform ${
-                            selected3D.color?.toLowerCase() ===
+                        title={preset.label}
+                        className={`h-7 rounded-lg border-2 cursor-pointer transition-transform ${selected3D.color?.toLowerCase() ===
                             preset.color.toLowerCase()
-                              ? "border-sky-600 scale-105"
-                              : "border-slate-200 hover:scale-105"
+                            ? "border-sky-600 scale-105"
+                            : "border-slate-200 hover:scale-105"
                           }`}
-                          style={{ backgroundColor: preset.color }}
-                        />
-                      ))}
-                    </div>
-                  </div>
-
-                  {/* Delete / Reset Selected Building */}
-                  <div className="pt-2 border-t border-slate-200 flex flex-wrap items-center justify-between gap-2">
-                    <button
-                      type="button"
-                      onClick={handleDeleteSelected3D}
-                      className="min-h-[38px] px-3 rounded-xl border border-rose-200 bg-rose-50 hover:bg-rose-100 text-xs font-bold text-[#BE123C] inline-flex items-center gap-1.5 cursor-pointer"
-                    >
-                      <Trash2 className="w-3.5 h-3.5" />
-                      <span>ลบบล็อกนี้</span>
-                    </button>
-                    {!selected3DIsCustom && (
-                      <button
-                        type="button"
-                        onClick={handleResetSelected3D}
-                        className="min-h-[38px] px-3 rounded-xl border border-slate-200 hover:bg-slate-100 text-xs font-bold text-slate-700 inline-flex items-center gap-1.5 cursor-pointer"
-                      >
-                        <RotateCcw className="w-3.5 h-3.5" />
-                        <span>รีเซ็ตตึกนี้</span>
-                      </button>
-                    )}
-                    <button
-                      type="button"
-                      onClick={() => setSelected3D(null)}
-                      className="min-h-[38px] px-2.5 rounded-xl border border-slate-200 hover:bg-slate-100 text-xs font-semibold text-slate-600 cursor-pointer"
-                    >
-                      ปิด
-                    </button>
+                        style={{ backgroundColor: preset.color }}
+                      />
+                    ))}
                   </div>
                 </div>
-              )}
-            </div>
-          </aside>
-        )}
 
-        {/* Floating Collapsible Survey Tracks Panel when Mode 5 is active */}
-        {showSurveys && (
-          <aside className="absolute top-[70px] right-14 bottom-3 z-[425] w-80 max-w-[calc(100vw-24px)] rounded-2xl bg-white/97 backdrop-blur-md border border-slate-200 shadow-2xl flex flex-col overflow-hidden">
-            <div className="px-4 py-3 border-b border-slate-200 flex items-center justify-between">
-              <div className="flex items-center gap-2">
-                <Route className="w-4 h-4 text-orange-500" />
-                <h2 className="font-heading text-sm font-bold text-[#0F172A]">
-                  รอยเดินสำรวจ ({surveys.length})
-                </h2>
+                {/* Delete / Reset Selected Building */}
+                <div className="pt-2 border-t border-slate-200 flex flex-wrap items-center justify-between gap-2">
+                  <button
+                    type="button"
+                    onClick={handleDeleteSelected3D}
+                    className="min-h-[38px] px-3 rounded-xl border border-rose-200 bg-rose-50 hover:bg-rose-100 text-xs font-bold text-[#BE123C] inline-flex items-center gap-1.5 cursor-pointer"
+                  >
+                    <Trash2 className="w-3.5 h-3.5" />
+                    <span>ลบบล็อกนี้</span>
+                  </button>
+                  {!selected3DIsCustom && (
+                    <button
+                      type="button"
+                      onClick={handleResetSelected3D}
+                      className="min-h-[38px] px-3 rounded-xl border border-slate-200 hover:bg-slate-100 text-xs font-bold text-slate-700 inline-flex items-center gap-1.5 cursor-pointer"
+                    >
+                      <RotateCcw className="w-3.5 h-3.5" />
+                      <span>รีเซ็ตตึกนี้</span>
+                    </button>
+                  )}
+                  <button
+                    type="button"
+                    onClick={() => setSelected3D(null)}
+                    className="min-h-[38px] px-2.5 rounded-xl border border-slate-200 hover:bg-slate-100 text-xs font-semibold text-slate-600 cursor-pointer"
+                  >
+                    ปิด
+                  </button>
+                </div>
               </div>
+            )}
+          </div>
+        </aside>
+      )}
+
+      {/* Floating Collapsible Survey Tracks Panel when Mode 5 is active */}
+      {showSurveys && (
+        <aside className="absolute top-[70px] right-14 bottom-3 z-[425] w-80 max-w-[calc(100vw-24px)] rounded-2xl bg-white/97 backdrop-blur-md border border-slate-200 shadow-2xl flex flex-col overflow-hidden">
+          <div className="px-4 py-3 border-b border-slate-200 flex items-center justify-between">
+            <div className="flex items-center gap-2">
+              <Route className="w-4 h-4 text-orange-500" />
+              <h2 className="font-heading text-sm font-bold text-[#0F172A]">
+                รอยเดินสำรวจ ({surveys.length})
+              </h2>
+            </div>
+            <button
+              type="button"
+              onClick={() => setShowSurveys(false)}
+              className="w-8 h-8 rounded-lg hover:bg-slate-100 text-slate-500 flex items-center justify-center cursor-pointer"
+              aria-label="ปิดแผง Survey Tracks"
+            >
+              <X className="w-4 h-4" />
+            </button>
+          </div>
+
+          <div className="px-4 py-2 border-b border-slate-100 flex items-center justify-between gap-2 bg-slate-50/70 text-[11px] font-bold">
+            <span className="text-slate-600">
+              แสดงอยู่ {visibleSurveyIds.length}/{surveys.length} เส้น
+            </span>
+            <div className="flex items-center gap-2">
               <button
                 type="button"
-                onClick={() => setShowSurveys(false)}
-                className="w-8 h-8 rounded-lg hover:bg-slate-100 text-slate-500 flex items-center justify-center cursor-pointer"
-                aria-label="ปิดแผง Survey Tracks"
+                onClick={() => setVisibleSurveyIds(surveys.map((s) => s.id))}
+                className="text-[#0F766E] hover:underline cursor-pointer"
               >
-                <X className="w-4 h-4" />
+                เลือกทั้งหมด
+              </button>
+              <span className="text-slate-300">|</span>
+              <button
+                type="button"
+                onClick={() => setVisibleSurveyIds([])}
+                className="text-slate-500 hover:underline cursor-pointer"
+              >
+                ซ่อนทั้งหมด
               </button>
             </div>
+          </div>
 
-            <div className="px-4 py-2 border-b border-slate-100 flex items-center justify-between gap-2 bg-slate-50/70 text-[11px] font-bold">
-              <span className="text-slate-600">
-                แสดงอยู่ {visibleSurveyIds.length}/{surveys.length} เส้น
-              </span>
-              <div className="flex items-center gap-2">
-                <button
-                  type="button"
-                  onClick={() => setVisibleSurveyIds(surveys.map((s) => s.id))}
-                  className="text-[#0F766E] hover:underline cursor-pointer"
-                >
-                  เลือกทั้งหมด
-                </button>
-                <span className="text-slate-300">|</span>
-                <button
-                  type="button"
-                  onClick={() => setVisibleSurveyIds([])}
-                  className="text-slate-500 hover:underline cursor-pointer"
-                >
-                  ซ่อนทั้งหมด
-                </button>
-              </div>
-            </div>
-
-            <div className="flex-1 overflow-y-auto p-3 space-y-2">
-              {surveys.length === 0 ? (
-                <p className="text-xs text-slate-500 text-center py-6">
-                  ยังไม่มีรอยเดินสำรวจในระบบ สามารถบันทึกได้จากหน้า
-                  &ldquo;เก็บพิกัดภาคสนาม&rdquo;
-                </p>
-              ) : (
-                surveys.map((track) => {
-                  const checked = visibleSurveyIds.includes(track.id);
-                  const isCompleted = track.status === "completed";
-                  const isSplitting = splitTrackId === track.id;
-                  const ptCount = Array.isArray(track.points_json)
-                    ? track.points_json.length
-                    : 0;
-                  return (
-                    <div
-                      key={track.id}
-                      className={`rounded-xl border p-2.5 space-y-1.5 transition-colors ${
-                        isSplitting
-                          ? "border-sky-400 bg-sky-50/80 ring-2 ring-sky-400/20"
-                          : checked
+          <div className="flex-1 overflow-y-auto p-3 space-y-2">
+            {surveys.length === 0 ? (
+              <p className="text-xs text-slate-500 text-center py-6">
+                ยังไม่มีรอยเดินสำรวจในระบบ สามารถบันทึกได้จากหน้า
+                &ldquo;เก็บพิกัดภาคสนาม&rdquo;
+              </p>
+            ) : (
+              surveys.map((track) => {
+                const checked = visibleSurveyIds.includes(track.id);
+                const isCompleted = track.status === "completed";
+                const isSplitting = splitTrackId === track.id;
+                const ptCount = Array.isArray(track.points_json)
+                  ? track.points_json.length
+                  : 0;
+                return (
+                  <div
+                    key={track.id}
+                    className={`rounded-xl border p-2.5 space-y-1.5 transition-colors ${isSplitting
+                        ? "border-sky-400 bg-sky-50/80 ring-2 ring-sky-400/20"
+                        : checked
                           ? "border-slate-200 bg-white"
                           : "border-slate-100 bg-slate-50/60 opacity-70"
                       }`}
-                    >
-                      <div className="flex items-start gap-2">
-                        <input
-                          type="checkbox"
-                          checked={checked}
-                          onChange={() => handleToggleSurveyVisible(track.id)}
-                          aria-label={`แสดงรอยเดิน ${track.name}`}
-                          className="w-4 h-4 mt-0.5 accent-[#0F766E] shrink-0 cursor-pointer"
-                        />
-                        <div className="min-w-0 flex-1">
-                          <div className="flex items-center gap-1.5">
-                            <span
-                              className="w-2.5 h-2.5 rounded-full shrink-0 border border-black/10"
-                              style={{
-                                backgroundColor: track.color_hex || "#F97316",
-                              }}
-                            />
-                            <p className="text-xs font-bold text-[#0F172A] truncate">
-                              {track.name}
-                            </p>
-                          </div>
-                          <div className="flex items-center gap-1.5 flex-wrap mt-1">
-                            <span
-                              className={`px-1.5 py-0.5 rounded text-[10px] font-bold ${
-                                isCompleted
-                                  ? "bg-emerald-100 text-emerald-800"
-                                  : "bg-amber-100 text-amber-800"
-                              }`}
-                            >
-                              {isCompleted ? "เสร็จแล้ว" : "กำลังทำ"}
-                            </span>
-                            {track.zone && (
-                              <span className="px-1.5 py-0.5 rounded bg-slate-100 text-slate-600 text-[10px] font-semibold">
-                                {track.zone}
-                              </span>
-                            )}
-                            <span className="text-[11px] text-slate-500">
-                              {ptCount} จุด
-                            </span>
-                          </div>
-                        </div>
-                        <div className="flex items-center gap-0.5 shrink-0">
-                          <button
-                            type="button"
-                            disabled={ptCount < 3 || isSurveyBusy}
-                            onClick={() => {
-                              if (!checked) {
-                                setVisibleSurveyIds((prev) => [...prev, track.id]);
-                              }
-                              setSplitTrackId((prev) =>
-                                prev === track.id ? null : track.id
-                              );
+                  >
+                    <div className="flex items-start gap-2">
+                      <input
+                        type="checkbox"
+                        checked={checked}
+                        onChange={() => handleToggleSurveyVisible(track.id)}
+                        aria-label={`แสดงรอยเดิน ${track.name}`}
+                        className="w-4 h-4 mt-0.5 accent-[#0F766E] shrink-0 cursor-pointer"
+                      />
+                      <div className="min-w-0 flex-1">
+                        <div className="flex items-center gap-1.5">
+                          <span
+                            className="w-2.5 h-2.5 rounded-full shrink-0 border border-black/10"
+                            style={{
+                              backgroundColor: track.color_hex || "#F97316",
                             }}
-                            title="ตัดแบ่งรอยเดินนี้เป็น 2 ท่อน"
-                            aria-label={`ตัดแบ่งรอยเดิน ${track.name}`}
-                            className={`w-7 h-7 rounded-lg flex items-center justify-center cursor-pointer disabled:opacity-35 ${
-                              isSplitting
-                                ? "bg-sky-600 text-white"
-                                : "hover:bg-sky-50 text-sky-700"
-                            }`}
+                          />
+                          <p className="text-xs font-bold text-[#0F172A] truncate">
+                            {track.name}
+                          </p>
+                        </div>
+                        <div className="flex items-center gap-1.5 flex-wrap mt-1">
+                          <span
+                            className={`px-1.5 py-0.5 rounded text-[10px] font-bold ${isCompleted
+                                ? "bg-emerald-100 text-emerald-800"
+                                : "bg-amber-100 text-amber-800"
+                              }`}
                           >
-                            <Scissors className="w-3.5 h-3.5" />
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() =>
-                              setDeleteTarget({
-                                type: "survey",
-                                id: track.id,
-                                label: `รอยเดินสำรวจ "${track.name}"`,
-                              })
-                            }
-                            className="w-7 h-7 rounded-lg hover:bg-rose-100 text-rose-600 flex items-center justify-center cursor-pointer"
-                            aria-label={`ลบรอยเดิน ${track.name}`}
-                          >
-                            <Trash2 className="w-3.5 h-3.5" />
-                          </button>
+                            {isCompleted ? "เสร็จแล้ว" : "กำลังทำ"}
+                          </span>
+                          {track.zone && (
+                            <span className="px-1.5 py-0.5 rounded bg-slate-100 text-slate-600 text-[10px] font-semibold">
+                              {track.zone}
+                            </span>
+                          )}
+                          <span className="text-[11px] text-slate-500">
+                            {ptCount} จุด
+                          </span>
                         </div>
                       </div>
+                      <div className="flex items-center gap-0.5 shrink-0">
+                        <button
+                          type="button"
+                          disabled={ptCount < 3 || isSurveyBusy}
+                          onClick={() => {
+                            if (!checked) {
+                              setVisibleSurveyIds((prev) => [...prev, track.id]);
+                            }
+                            setSplitTrackId((prev) =>
+                              prev === track.id ? null : track.id
+                            );
+                          }}
+                          title="ตัดแบ่งรอยเดินนี้เป็น 2 ท่อน"
+                          aria-label={`ตัดแบ่งรอยเดิน ${track.name}`}
+                          className={`w-7 h-7 rounded-lg flex items-center justify-center cursor-pointer disabled:opacity-35 ${isSplitting
+                              ? "bg-sky-600 text-white"
+                              : "hover:bg-sky-50 text-sky-700"
+                            }`}
+                        >
+                          <Scissors className="w-3.5 h-3.5" />
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() =>
+                            setDeleteTarget({
+                              type: "survey",
+                              id: track.id,
+                              label: `รอยเดินสำรวจ "${track.name}"`,
+                            })
+                          }
+                          className="w-7 h-7 rounded-lg hover:bg-rose-100 text-rose-600 flex items-center justify-center cursor-pointer"
+                          aria-label={`ลบรอยเดิน ${track.name}`}
+                        >
+                          <Trash2 className="w-3.5 h-3.5" />
+                        </button>
+                      </div>
                     </div>
-                  );
-                })
-              )}
-            </div>
-
-            {surveys.length >= 2 && (
-              <div className="p-3 border-t border-slate-200 bg-slate-50/90">
-                <button
-                  type="button"
-                  onClick={handleOpenMergeModal}
-                  disabled={visibleSurveyIds.length < 2 || isSurveyBusy}
-                  className="w-full min-h-[38px] px-3 rounded-xl bg-[#0F766E] hover:bg-[#115E59] disabled:opacity-45 text-white text-xs font-bold inline-flex items-center justify-center gap-1.5 cursor-pointer"
-                >
-                  <GitMerge className="w-4 h-4" />
-                  <span>
-                    รวมรอยเดินที่ติ๊กเลือก ({visibleSurveyIds.length} เส้น)
-                  </span>
-                </button>
-              </div>
+                  </div>
+                );
+              })
             )}
-          </aside>
-        )}
-
-        {/* Toast Notification */}
-        {toast && (
-          <div
-            className={`fixed bottom-5 right-5 z-[1000] max-w-sm rounded-2xl px-4 py-3 shadow-lg border flex items-center gap-2.5 text-sm font-semibold ${
-              toast.type === "success"
-                ? "bg-[#0F766E] text-white border-teal-700"
-                : "bg-[#FFE4E6] text-[#BE123C] border-rose-200"
-            }`}
-          >
-            {toast.type === "success" ? (
-              <CheckCircle2 className="w-5 h-5 shrink-0" />
-            ) : (
-              <ShieldAlert className="w-5 h-5 shrink-0" />
-            )}
-            <span>{toast.text}</span>
           </div>
-        )}
+
+          {surveys.length >= 2 && (
+            <div className="p-3 border-t border-slate-200 bg-slate-50/90">
+              <button
+                type="button"
+                onClick={handleOpenMergeModal}
+                disabled={visibleSurveyIds.length < 2 || isSurveyBusy}
+                className="w-full min-h-[38px] px-3 rounded-xl bg-[#0F766E] hover:bg-[#115E59] disabled:opacity-45 text-white text-xs font-bold inline-flex items-center justify-center gap-1.5 cursor-pointer"
+              >
+                <GitMerge className="w-4 h-4" />
+                <span>
+                  รวมรอยเดินที่ติ๊กเลือก ({visibleSurveyIds.length} เส้น)
+                </span>
+              </button>
+            </div>
+          )}
+        </aside>
+      )}
+
+      {/* Toast Notification */}
+      {toast && (
+        <div
+          className={`fixed bottom-5 right-5 z-[1000] max-w-sm rounded-2xl px-4 py-3 shadow-lg border flex items-center gap-2.5 text-sm font-semibold ${toast.type === "success"
+              ? "bg-[#0F766E] text-white border-teal-700"
+              : "bg-[#FFE4E6] text-[#BE123C] border-rose-200"
+            }`}
+        >
+          {toast.type === "success" ? (
+            <CheckCircle2 className="w-5 h-5 shrink-0" />
+          ) : (
+            <ShieldAlert className="w-5 h-5 shrink-0" />
+          )}
+          <span>{toast.text}</span>
+        </div>
+      )}
 
       {/* Merge Survey Tracks Modal */}
       {mergeModalOpen && (
@@ -2469,10 +2858,26 @@ export default function AdminMapPage() {
                   rows={2}
                   value={cloneDesc}
                   onChange={(e) => setCloneDesc(e.target.value)}
-                  placeholder="บันทึกเหตุผลการแก้ไข เช่น เพิ่มทางเชื่อมอาคารใหม่"
+                  placeholder="บันทึกเหตุผลการแก้ไข เช่น ชุดเส้นทางสำหรับผู้สูงอายุ"
                   className="w-full px-3 py-2 rounded-xl bg-slate-50 border border-slate-200 text-sm text-[#0F172A] focus:bg-white focus:outline-none focus:border-[#0F766E]"
                 />
               </div>
+              <label className="flex items-start gap-2.5 p-3 rounded-xl bg-teal-50/70 border border-teal-200 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={cloneKeepBuildingsOnly}
+                  onChange={(e) => setCloneKeepBuildingsOnly(e.target.checked)}
+                  className="mt-0.5 w-4 h-4 accent-[#0F766E]"
+                />
+                <div className="text-xs">
+                  <span className="font-bold text-[#0F766E] block">
+                    เก็บเฉพาะตึกสีเขียว (เริ่มวาดเส้นทางใหม่ทั้งหมด)
+                  </span>
+                  <span className="text-slate-600 block mt-0.5">
+                    ข้อมูลตึกสีเขียว แผนก รูปภาพ และโมเดล 3D อยู่ครบทั้งหมด แต่จะไม่คัดลอกเส้นทางและจุดทางแยกเดิม เพื่อให้วาดชุดเส้นทางใหม่ได้อิสระ
+                  </span>
+                </div>
+              </label>
               <div className="flex items-center justify-end gap-2 pt-1">
                 <button
                   type="button"
@@ -2543,17 +2948,33 @@ export default function AdminMapPage() {
                   className="w-full px-3 py-2 rounded-xl bg-slate-50 border border-slate-200 text-sm text-[#0F172A] focus:bg-white focus:outline-none focus:border-[#0F766E]"
                 />
               </div>
-              <div className="flex items-center justify-between gap-2 pt-2 border-t border-slate-100">
+              <div className="flex flex-wrap items-center justify-between gap-2 pt-2 border-t border-slate-100">
                 {!editVersionModal.is_live ? (
-                  <button
-                    type="button"
-                    disabled={isVersionBusy}
-                    onClick={() => handleDeleteDraftVersion(editVersionModal.id)}
-                    className="min-h-[40px] px-3 rounded-xl border border-rose-200 bg-rose-50 hover:bg-rose-100 text-xs font-bold text-[#BE123C] inline-flex items-center gap-1.5 cursor-pointer"
-                  >
-                    <Trash2 className="w-3.5 h-3.5" />
-                    <span>ลบฉบับร่างนี้</span>
-                  </button>
+                  <div className="flex items-center gap-1.5">
+                    <button
+                      type="button"
+                      disabled={isVersionBusy}
+                      onClick={() =>
+                        handleClearVersionPaths(editVersionModal.id)
+                      }
+                      title="ลบเฉพาะเส้นทางและจุดแยกสีน้ำเงิน โดยเก็บตึกสีเขียวไว้ครบทั้งหมด"
+                      className="min-h-[38px] px-2.5 rounded-xl border border-amber-200 bg-amber-50 hover:bg-amber-100 text-xs font-bold text-amber-800 inline-flex items-center gap-1 cursor-pointer"
+                    >
+                      <RotateCcw className="w-3.5 h-3.5" />
+                      <span>ล้างเส้นเดิม</span>
+                    </button>
+                    <button
+                      type="button"
+                      disabled={isVersionBusy}
+                      onClick={() =>
+                        handleDeleteDraftVersion(editVersionModal.id)
+                      }
+                      className="min-h-[38px] px-2.5 rounded-xl border border-rose-200 bg-rose-50 hover:bg-rose-100 text-xs font-bold text-[#BE123C] inline-flex items-center gap-1 cursor-pointer"
+                    >
+                      <Trash2 className="w-3.5 h-3.5" />
+                      <span>ลบฉบับร่าง</span>
+                    </button>
+                  </div>
                 ) : (
                   <span className="text-[11px] font-semibold text-emerald-700">
                     เวอร์ชันใช้งานจริง (ลบไม่ได้)
@@ -2866,11 +3287,10 @@ export default function AdminMapPage() {
                       prev ? { ...prev, is_active: true } : null
                     )
                   }
-                  className={`min-h-[44px] px-3 rounded-xl border text-xs font-bold inline-flex items-center justify-center gap-1.5 cursor-pointer transition-colors ${
-                    edgeModal.is_active
+                  className={`min-h-[44px] px-3 rounded-xl border text-xs font-bold inline-flex items-center justify-center gap-1.5 cursor-pointer transition-colors ${edgeModal.is_active
                       ? "bg-[#0F766E] border-[#0F766E] text-white"
                       : "bg-slate-50 border-slate-200 text-slate-600 hover:bg-teal-50"
-                  }`}
+                    }`}
                 >
                   <CheckCircle2 className="w-4 h-4" />
                   <span>เปิดใช้งานปกติ</span>
@@ -2882,11 +3302,10 @@ export default function AdminMapPage() {
                       prev ? { ...prev, is_active: false } : null
                     )
                   }
-                  className={`min-h-[44px] px-3 rounded-xl border text-xs font-bold inline-flex items-center justify-center gap-1.5 cursor-pointer transition-colors ${
-                    !edgeModal.is_active
+                  className={`min-h-[44px] px-3 rounded-xl border text-xs font-bold inline-flex items-center justify-center gap-1.5 cursor-pointer transition-colors ${!edgeModal.is_active
                       ? "bg-[#BE123C] border-[#BE123C] text-white"
                       : "bg-slate-50 border-slate-200 text-slate-600 hover:bg-rose-50"
-                  }`}
+                    }`}
                 >
                   <ShieldAlert className="w-4 h-4" />
                   <span>ปิดปรับปรุงชั่วคราว</span>

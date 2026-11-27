@@ -52,10 +52,18 @@ let cachedAdminCampusDataset: SakonHospital3DDataset | null = null;
 
 export type AdminEditorMode =
   | "add_node"
+  | "draw_path"
   | "connect_edge"
   | "toggle_edge"
   | "delete"
   | "customize_3d";
+
+export interface DraftPathPoint {
+  lat: number;
+  lng: number;
+  nodeId?: number | null;
+  label?: string;
+}
 
 interface AdminMapEditorProps {
   mapViewMode: MapViewMode;
@@ -66,6 +74,7 @@ interface AdminMapEditorProps {
   surveys: SurveyTrack[];
   showSurveys: boolean;
   selectedSourceNodeId: number | null;
+  draftPathPoints?: DraftPathPoint[];
   onMapClick: (lat: number, lng: number) => void;
   onNodeClick: (node: MapNode) => void;
   onEdgeClick: (edge: MapEdge) => void;
@@ -154,6 +163,7 @@ export default function AdminMapEditor({
   surveys,
   showSurveys,
   selectedSourceNodeId,
+  draftPathPoints = [],
   onMapClick,
   onNodeClick,
   onEdgeClick,
@@ -238,7 +248,7 @@ export default function AdminMapEditor({
         maxBoundsViscosity={1.0}
         style={{ background: CAMPUS_MASK_COLOR }}
         className={`w-full h-full z-0 ${
-          mode === "add_node" ? "cursor-crosshair" : ""
+          mode === "add_node" || mode === "draw_path" ? "cursor-crosshair" : ""
         }`}
       >
         {isStreet ? (
@@ -295,7 +305,9 @@ export default function AdminMapEditor({
         <MapAutoController resetTrigger={resetTrigger} />
 
         <MapClickListener
-          enabled={mode === "add_node" || splitTrackId !== null}
+          enabled={
+            mode === "add_node" || mode === "draw_path" || splitTrackId !== null
+          }
           onMapClick={(lat, lng) => {
             if (splitTrackId !== null) {
               onSplitTrackClick?.(splitTrackId, lat, lng);
@@ -304,6 +316,33 @@ export default function AdminMapEditor({
             onMapClick(lat, lng);
           }}
         />
+
+        {/* Freeform Draft Path Preview (Mode: draw_path) */}
+        {draftPathPoints.length >= 2 && (
+          <Polyline
+            positions={draftPathPoints.map((p) => [p.lat, p.lng])}
+            pathOptions={{
+              color: "#F97316",
+              weight: 5.5,
+              opacity: 0.95,
+              dashArray: "8 6",
+            }}
+          />
+        )}
+        {draftPathPoints.map((pt, idx) => (
+          <Marker
+            key={`draft-pt-${idx}`}
+            position={[pt.lat, pt.lng]}
+            interactive={false}
+            zIndexOffset={700}
+            icon={L.divIcon({
+              className: "",
+              iconSize: [18, 18],
+              iconAnchor: [9, 9],
+              html: `<div style="width:18px;height:18px;border-radius:9999px;background:#F97316;border:2px solid #FFFFFF;color:#FFFFFF;font-size:10px;font-weight:700;display:flex;align-items:center;justify-content:center;box-shadow:0 2px 6px rgba(15,23,42,0.4);">${idx + 1}</div>`,
+            })}
+          />
+        ))}
 
         {/* Survey Tracks Overlay (Mode 5 - Per-track distinct colors + Split Track click) */}
         {showSurveys &&

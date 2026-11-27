@@ -9,7 +9,6 @@ import {
   Compass,
   ExternalLink,
   History,
-  LayoutDashboard,
   Loader2,
   LogOut,
   Megaphone,
@@ -26,35 +25,29 @@ interface AdminNavItem {
   href: string;
   label: string;
   shortLabel: string;
-  icon: typeof LayoutDashboard;
+  icon: typeof Building2;
   exact?: boolean;
 }
 
 const ADMIN_NAV_ITEMS: AdminNavItem[] = [
   {
     href: "/admin",
-    label: "ภาพรวม & ตรวจสุขภาพแผนที่",
-    shortLabel: "ภาพรวม",
-    icon: LayoutDashboard,
+    label: "ข้อมูลตึก & แผนก",
+    shortLabel: "ข้อมูลตึก",
+    icon: Building2,
     exact: true,
   },
   {
-    href: "/admin/directory",
-    label: "แก้ไขข้อมูลตึก",
-    shortLabel: "แก้ไขข้อมูลตึก",
-    icon: Building2,
+    href: "/admin/survey",
+    label: "เก็บพิกัดภาคสนาม",
+    shortLabel: "เก็บพิกัด",
+    icon: Compass,
   },
   {
     href: "/admin/map",
     label: "แก้ไขแผนที่ 3D",
-    shortLabel: "แก้ไขแผนที่ 3D",
+    shortLabel: "แผนที่ 3D",
     icon: Box,
-  },
-  {
-    href: "/admin/history",
-    label: "ประวัติการแก้ไข",
-    shortLabel: "ประวัติการแก้ไข",
-    icon: History,
   },
   {
     href: "/admin/settings",
@@ -63,17 +56,18 @@ const ADMIN_NAV_ITEMS: AdminNavItem[] = [
     icon: Megaphone,
   },
   {
-    href: "/admin/survey",
-    label: "เก็บพิกัดภาคสนาม",
-    shortLabel: "GPS Survey",
-    icon: Compass,
+    href: "/admin/history",
+    label: "ประวัติการแก้ไข",
+    shortLabel: "ประวัติ",
+    icon: History,
   },
 ];
 
 const MOBILE_BOTTOM_TABS: AdminNavItem[] = [
-  ADMIN_NAV_ITEMS[1], // แก้ไขข้อมูลตึก
-  ADMIN_NAV_ITEMS[2], // แก้ไขแผนที่ 3D
-  ADMIN_NAV_ITEMS[3], // ประวัติการแก้ไข
+  ADMIN_NAV_ITEMS[0], // ข้อมูลตึก
+  ADMIN_NAV_ITEMS[1], // เก็บพิกัด
+  ADMIN_NAV_ITEMS[2], // แผนที่ 3D
+  ADMIN_NAV_ITEMS[4], // ประวัติ
 ];
 
 export default function AdminLayout({
@@ -251,11 +245,10 @@ export default function AdminLayout({
             key={item.href}
             href={item.href}
             title={collapsed ? item.label : undefined}
-            className={`min-h-[44px] px-3 rounded-xl flex items-center gap-3 text-sm font-semibold transition-colors ${
-              active
+            className={`min-h-[44px] px-3 rounded-xl flex items-center gap-3 text-sm font-semibold transition-colors ${active
                 ? "bg-[#0F766E] text-white shadow-xs"
                 : "text-slate-700 hover:bg-slate-100 hover:text-[#0F172A]"
-            } ${collapsed ? "justify-center px-0" : ""}`}
+              } ${collapsed ? "justify-center px-0" : ""}`}
           >
             <Icon className="w-4 h-4 shrink-0" />
             {!collapsed && <span className="truncate">{item.label}</span>}
@@ -269,127 +262,123 @@ export default function AdminLayout({
     <div className="h-dvh w-full flex flex-col md:flex-row overflow-hidden bg-[#F8FAFC]">
       {/* Desktop Collapsible Sidebar (hidden when full-screen map mode is active) */}
       {!sidebarHidden && (
-      <aside
-        className={`hidden md:flex shrink-0 h-full flex-col bg-white border-r border-slate-200 transition-all duration-200 ${
-          sidebarCollapsed ? "w-[72px]" : "w-64"
-        }`}
-      >
-        <div className="shrink-0 h-16 px-3 border-b border-slate-200 flex items-center justify-between gap-2">
-          <Link
-            href="/admin"
-            className={`flex items-center gap-2.5 min-w-0 ${
-              sidebarCollapsed ? "justify-center w-full" : ""
+        <aside
+          className={`hidden md:flex shrink-0 h-full flex-col bg-white border-r border-slate-200 transition-all duration-200 ${sidebarCollapsed ? "w-[72px]" : "w-64"
             }`}
-          >
-            {/* eslint-disable-next-line @next/next/no-img-element */}
-            <img
-              src="/sakon-hospital-logo.png"
-              alt="โลโก้โรงพยาบาลสกลนคร"
-              className="h-9 w-auto object-contain shrink-0"
-            />
+        >
+          <div className="shrink-0 h-16 px-3 border-b border-slate-200 flex items-center justify-between gap-2">
+            <Link
+              href="/admin"
+              className={`flex items-center gap-2.5 min-w-0 ${sidebarCollapsed ? "justify-center w-full" : ""
+                }`}
+            >
+              {/* eslint-disable-next-line @next/next/no-img-element */}
+              <img
+                src="/sakon-hospital-logo.png"
+                alt="โลโก้โรงพยาบาลสกลนคร"
+                className="h-9 w-auto object-contain shrink-0"
+              />
+              {!sidebarCollapsed && (
+                <div className="min-w-0">
+                  <p className="font-heading text-sm font-bold text-[#0F172A] truncate leading-tight">
+                    รพ.สกลนคร
+                  </p>
+                  <p className="text-[11px] text-slate-500 truncate">
+                    ผู้ดูแลระบบ
+                  </p>
+                </div>
+              )}
+            </Link>
+
             {!sidebarCollapsed && (
-              <div className="min-w-0">
-                <p className="font-heading text-sm font-bold text-[#0F172A] truncate leading-tight">
-                  รพ.สกลนคร Admin
-                </p>
-                <p className="text-[11px] text-slate-500 truncate">
-                  ระบบจัดการแผนที่นำทาง
-                </p>
-              </div>
+              <button
+                type="button"
+                onClick={() => setSidebarCollapsed(true)}
+                title="พับแถบเมนูซ้าย"
+                aria-label="พับแถบเมนูซ้าย"
+                className="w-8 h-8 rounded-lg hover:bg-slate-100 text-slate-500 flex items-center justify-center shrink-0 cursor-pointer"
+              >
+                <PanelLeftClose className="w-4 h-4" />
+              </button>
             )}
-          </Link>
+          </div>
 
-          {!sidebarCollapsed && (
-            <button
-              type="button"
-              onClick={() => setSidebarCollapsed(true)}
-              title="พับแถบเมนูซ้าย"
-              aria-label="พับแถบเมนูซ้าย"
-              className="w-8 h-8 rounded-lg hover:bg-slate-100 text-slate-500 flex items-center justify-center shrink-0 cursor-pointer"
-            >
-              <PanelLeftClose className="w-4 h-4" />
-            </button>
+          {sidebarCollapsed && (
+            <div className="px-2.5 pt-2.5 flex justify-center">
+              <button
+                type="button"
+                onClick={() => setSidebarCollapsed(false)}
+                title="กางแถบเมนูซ้าย"
+                aria-label="กางแถบเมนูซ้าย"
+                className="w-10 h-10 rounded-xl hover:bg-slate-100 text-slate-600 flex items-center justify-center cursor-pointer"
+              >
+                <PanelLeftOpen className="w-4 h-4" />
+              </button>
+            </div>
           )}
-        </div>
 
-        {sidebarCollapsed && (
-          <div className="px-2.5 pt-2.5 flex justify-center">
+          {renderSidebarLinks(sidebarCollapsed)}
+
+          <div className="shrink-0 p-2.5 border-t border-slate-200 space-y-1.5">
+            <a
+              href="/"
+              target="_blank"
+              rel="noopener noreferrer"
+              title={sidebarCollapsed ? "เปิดหน้าผู้ใช้ทั่วไป (แท็บใหม่)" : undefined}
+              className={`min-h-[40px] px-3 rounded-xl border border-slate-200 bg-slate-50 hover:bg-teal-50 hover:border-teal-200 text-xs font-semibold text-slate-700 flex items-center gap-2.5 transition-colors ${sidebarCollapsed ? "justify-center px-0" : ""
+                }`}
+            >
+              <ExternalLink className="w-4 h-4 text-[#0F766E] shrink-0" />
+              {!sidebarCollapsed && <span>เปิดหน้าแผนที่ผู้ใช้</span>}
+            </a>
+
             <button
               type="button"
-              onClick={() => setSidebarCollapsed(false)}
-              title="กางแถบเมนูซ้าย"
-              aria-label="กางแถบเมนูซ้าย"
-              className="w-10 h-10 rounded-xl hover:bg-slate-100 text-slate-600 flex items-center justify-center cursor-pointer"
+              onClick={handleLogout}
+              title={sidebarCollapsed ? "ออกจากระบบ" : undefined}
+              className={`w-full min-h-[40px] px-3 rounded-xl border border-rose-200 bg-[#FFE4E6]/60 hover:bg-[#FFE4E6] text-xs font-bold text-[#BE123C] flex items-center gap-2.5 transition-colors cursor-pointer ${sidebarCollapsed ? "justify-center px-0" : ""
+                }`}
             >
-              <PanelLeftOpen className="w-4 h-4" />
+              <LogOut className="w-4 h-4 shrink-0" />
+              {!sidebarCollapsed && <span>ออกจากระบบ</span>}
             </button>
           </div>
-        )}
-
-        {renderSidebarLinks(sidebarCollapsed)}
-
-        <div className="shrink-0 p-2.5 border-t border-slate-200 space-y-1.5">
-          <a
-            href="/"
-            target="_blank"
-            rel="noopener noreferrer"
-            title={sidebarCollapsed ? "เปิดหน้าผู้ใช้ทั่วไป (แท็บใหม่)" : undefined}
-            className={`min-h-[40px] px-3 rounded-xl border border-slate-200 bg-slate-50 hover:bg-teal-50 hover:border-teal-200 text-xs font-semibold text-slate-700 flex items-center gap-2.5 transition-colors ${
-              sidebarCollapsed ? "justify-center px-0" : ""
-            }`}
-          >
-            <ExternalLink className="w-4 h-4 text-[#0F766E] shrink-0" />
-            {!sidebarCollapsed && <span>เปิดหน้าแผนที่ผู้ใช้</span>}
-          </a>
-
-          <button
-            type="button"
-            onClick={handleLogout}
-            title={sidebarCollapsed ? "ออกจากระบบ" : undefined}
-            className={`w-full min-h-[40px] px-3 rounded-xl border border-rose-200 bg-[#FFE4E6]/60 hover:bg-[#FFE4E6] text-xs font-bold text-[#BE123C] flex items-center gap-2.5 transition-colors cursor-pointer ${
-              sidebarCollapsed ? "justify-center px-0" : ""
-            }`}
-          >
-            <LogOut className="w-4 h-4 shrink-0" />
-            {!sidebarCollapsed && <span>ออกจากระบบ</span>}
-          </button>
-        </div>
-      </aside>
+        </aside>
       )}
 
       {/* Mobile Top Bar (hidden when full-screen map mode is active) */}
       {!sidebarHidden && (
-      <header className="md:hidden shrink-0 h-14 px-3 bg-white border-b border-slate-200 flex items-center justify-between gap-2">
-        <div className="flex items-center gap-2.5 min-w-0">
-          <button
-            type="button"
-            onClick={() => setMobileMenuOpen(true)}
-            aria-label="เปิดเมนูผู้ดูแลระบบ"
-            className="w-10 h-10 rounded-xl border border-slate-200 bg-white hover:bg-slate-50 text-slate-700 flex items-center justify-center shrink-0 cursor-pointer"
-          >
-            <Menu className="w-5 h-5" />
-          </button>
-          {/* eslint-disable-next-line @next/next/no-img-element */}
-          <img
-            src="/sakon-hospital-logo.png"
-            alt="โลโก้โรงพยาบาลสกลนคร"
-            className="h-8 w-auto object-contain shrink-0"
-          />
-          <span className="font-heading text-sm font-bold text-[#0F172A] truncate">
-            {activeNav.shortLabel}
-          </span>
-        </div>
+        <header className="md:hidden shrink-0 h-14 px-3 bg-white border-b border-slate-200 flex items-center justify-between gap-2">
+          <div className="flex items-center gap-2.5 min-w-0">
+            <button
+              type="button"
+              onClick={() => setMobileMenuOpen(true)}
+              aria-label="เปิดเมนูผู้ดูแลระบบ"
+              className="w-10 h-10 rounded-xl border border-slate-200 bg-white hover:bg-slate-50 text-slate-700 flex items-center justify-center shrink-0 cursor-pointer"
+            >
+              <Menu className="w-5 h-5" />
+            </button>
+            {/* eslint-disable-next-line @next/next/no-img-element */}
+            <img
+              src="/sakon-hospital-logo.png"
+              alt="โลโก้โรงพยาบาลสกลนคร"
+              className="h-8 w-auto object-contain shrink-0"
+            />
+            <span className="font-heading text-sm font-bold text-[#0F172A] truncate">
+              {activeNav.shortLabel}
+            </span>
+          </div>
 
-        <a
-          href="/"
-          target="_blank"
-          rel="noopener noreferrer"
-          className="min-h-[36px] px-2.5 rounded-lg border border-slate-200 bg-slate-50 text-xs font-semibold text-slate-700 inline-flex items-center gap-1.5 shrink-0"
-        >
-          <ExternalLink className="w-3.5 h-3.5 text-[#0F766E]" />
-          <span>หน้าผู้ใช้</span>
-        </a>
-      </header>
+          <a
+            href="/"
+            target="_blank"
+            rel="noopener noreferrer"
+            className="min-h-[36px] px-2.5 rounded-lg border border-slate-200 bg-slate-50 text-xs font-semibold text-slate-700 inline-flex items-center gap-1.5 shrink-0"
+          >
+            <ExternalLink className="w-3.5 h-3.5 text-[#0F766E]" />
+            <span>หน้าผู้ใช้</span>
+          </a>
+        </header>
       )}
 
       {/* Mobile Slide-Over Drawer */}
@@ -450,11 +439,11 @@ export default function AdminLayout({
         {children}
       </div>
 
-      {/* Mobile Bottom Navigation Bar (matches Admin 3-tab mockup) */}
+      {/* Mobile Bottom Navigation Bar */}
       {!sidebarHidden && (
         <nav
           aria-label="แถบเมนูล่างผู้ดูแลระบบ"
-          className="md:hidden shrink-0 bg-white border-t border-slate-200 px-2 py-1.5 grid grid-cols-3 gap-1.5 shadow-[0_-2px_10px_rgba(15,23,42,0.06)] z-[600]"
+          className="md:hidden shrink-0 bg-white border-t border-slate-200 px-2 py-1.5 grid grid-cols-4 gap-1 shadow-[0_-2px_10px_rgba(15,23,42,0.06)] z-[600]"
         >
           {MOBILE_BOTTOM_TABS.map((item) => {
             const Icon = item.icon;
@@ -463,11 +452,10 @@ export default function AdminLayout({
               <Link
                 key={item.href}
                 href={item.href}
-                className={`min-h-[50px] rounded-xl flex flex-col items-center justify-center gap-0.5 text-[11px] font-bold transition-colors ${
-                  active
+                className={`min-h-[50px] rounded-xl flex flex-col items-center justify-center gap-0.5 text-[11px] font-bold transition-colors ${active
                     ? "bg-[#CCFBF1] text-[#0F766E]"
                     : "text-slate-600 hover:bg-slate-50"
-                }`}
+                  }`}
               >
                 <Icon className="w-5 h-5" />
                 <span className="truncate">{item.shortLabel}</span>

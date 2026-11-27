@@ -110,7 +110,8 @@ export default function BuildingSearchBar({
       e.preventDefault();
       const picked = suggestions[highlightedIndex];
       if (picked) {
-        onSelectSuggestion(picked.building, picked.building.name);
+        onSelectSuggestion(picked.building, picked.primaryText);
+        onRouteSuggestion(picked.building);
         setIsOpen(false);
         setHighlightedIndex(-1);
       }
@@ -237,7 +238,8 @@ export default function BuildingSearchBar({
                       <button
                         type="button"
                         onClick={() => {
-                          onSelectSuggestion(item.building, item.building.name);
+                          onSelectSuggestion(item.building, item.primaryText);
+                          onRouteSuggestion(item.building);
                           setIsOpen(false);
                           setHighlightedIndex(-1);
                         }}
@@ -259,6 +261,11 @@ export default function BuildingSearchBar({
                                 query={value}
                               />
                             </span>
+                            {item.matchedFloor && (
+                              <span className="inline-flex items-center px-1.5 py-0.5 rounded bg-teal-50 border border-teal-200 text-[10px] font-bold text-[#0F766E]">
+                                {item.matchedFloor}
+                              </span>
+                            )}
                             <span
                               className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-bold border"
                               style={{
@@ -272,6 +279,7 @@ export default function BuildingSearchBar({
                           </div>
                           {item.secondaryText && (
                             <p className="text-xs text-slate-500 truncate mt-0.5">
+                              {item.matchedRoom ? "อาคาร: " : ""}
                               <HighlightMatch
                                 text={item.secondaryText}
                                 query={value}

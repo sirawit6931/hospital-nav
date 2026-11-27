@@ -30,8 +30,9 @@ type MapVersionSummary struct {
 }
 
 type mapVersionMetaRequest struct {
-	Name        string `json:"name"`
-	Description string `json:"description"`
+	Name              string `json:"name"`
+	Description       string `json:"description"`
+	KeepBuildingsOnly bool   `json:"keep_buildings_only"`
 }
 
 // ResolveLiveVersionID returns the ID of the currently live map version.
@@ -153,9 +154,13 @@ func CloneMapVersion(c *gin.Context) {
 			return err
 		}
 
-		// 1. Clone all map_nodes from source version
+		// 1. Clone map_nodes from source version (optionally keeping only green buildings so admin can draw fresh paths)
 		var srcNodes []models.MapNode
-		if err := tx.Where("version_id = ?", srcVersionID).Order("id ASC").Find(&srcNodes).Error; err != nil {
+		nodeQuery := tx.Where("version_id = ?", srcVersionID)
+		if req.KeepBuildingsOnly {
+			nodeQuery = nodeQuery.Where("is_building = ?", true)
+		}
+		if err := nodeQuery.Order("id ASC").Find(&srcNodes).Error; err != nil {
 			return err
 		}
 
@@ -225,9 +230,12 @@ func CloneMapVersion(c *gin.Context) {
 		}
 
 		// 3. Clone all map_edges with remapped from_node / to_node and PostGIS LineString geom
+		// (Skipped when KeepBuildingsOnly is true so admin starts with a clean path canvas)
 		var srcEdges []models.MapEdge
-		if err := tx.Where("version_id = ?", srcVersionID).Order("id ASC").Find(&srcEdges).Error; err != nil {
-			return err
+		if !req.KeepBuildingsOnly {
+			if err := tx.Where("version_id = ?", srcVersionID).Order("id ASC").Find(&srcEdges).Error; err != nil {
+				return err
+			}
 		}
 		for _, e := range srcEdges {
 			newFrom, okFrom := oldToNewNodeID[e.FromNode]
@@ -414,5 +422,46 @@ func DeleteMapVersion(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{
 		"message": "ลบเวอร์ชันแผนที่เรียบร้อยแล้ว",
 		"id":      target.ID,
+	})
+}
+
+// ClearVersionPaths removes all map_edges and non-building junction nodes (is_building = false)
+// in a Draft map version while keeping all green building nodes (is_building = true) and their departments intact.
+func ClearVersionPaths(c *gin.Context) {
+	id, err := strconv.ParseUint(c.Param("id"), 10, 64)
+	if err != nil || id == 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "รหัสเวอร์ชันไม่ถูกต้อง"})
+		return
+	}
+
+	var target models.MapVersion
+	if err := config.DB.First(&target, uint(id)).Error; err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "ไม่พบเวอร์ชันแผนที่"})
+		return
+	}
+	if target.IsLive {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error": "ไม่สามารถล้างเส้นทางบนเวอร์ชันใช้งานจริง (Live) โดยตรงได้ กรุณาคัดลอกเป็นฉบับร่างก่อน",
+		})
+		return
+	}
+
+	txErr := config.DB.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Where("version_id = ?", target.ID).Delete(&models.MapEdge{}).Error; err != nil {
+			return err
+		}
+		if err := tx.Where("version_id = ? AND is_building = ?", target.ID, false).Delete(&models.MapNode{}).Error; err != nil {
+			return err
+		}
+		return nil
+	})
+	if txErr != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "ไม่สามารถล้างเส้นทางเดิมได้"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"message": "ล้างเส้นทางและจุดทางแยกเดิมเรียบร้อยแล้ว (ข้อมูลตึกสีเขียวอยู่ครบทั้งหมด)",
+		"version": buildVersionSummary(target),
 	})
 }

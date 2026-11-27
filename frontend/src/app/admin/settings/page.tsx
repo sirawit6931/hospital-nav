@@ -306,11 +306,8 @@ export default function AdminSettingsPage() {
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
           <h1 className="font-heading text-xl font-bold text-[#0F172A]">
-            ประกาศ QR Code และสำรองข้อมูล
+            ประกาศ & QR Code
           </h1>
-          <p className="text-sm text-slate-500 mt-0.5">
-            จัดการแถบประกาศหน้าเว็บ สร้างป้าย QR จุดเริ่มต้น และส่งออกไฟล์สำรองข้อมูล (จัดการหมวดหมู่ได้ที่หน้า &ldquo;แก้ไขข้อมูลตึก&rdquo;)
-          </p>
         </div>
 
         <button
@@ -330,11 +327,10 @@ export default function AdminSettingsPage() {
         <button
           type="button"
           onClick={() => setActiveTab("announcements")}
-          className={`min-h-[42px] px-4 rounded-xl text-xs sm:text-sm font-bold inline-flex items-center gap-2 cursor-pointer ${
-            activeTab === "announcements"
+          className={`min-h-[42px] px-4 rounded-xl text-xs sm:text-sm font-bold inline-flex items-center gap-2 cursor-pointer ${activeTab === "announcements"
               ? "bg-[#0F766E] text-white shadow-xs"
               : "bg-white border border-slate-200 text-slate-700 hover:bg-slate-50"
-          }`}
+            }`}
         >
           <Megaphone className="w-4 h-4" />
           <span>ประกาศหน้าเว็บ ({announcements.length})</span>
@@ -343,11 +339,10 @@ export default function AdminSettingsPage() {
         <button
           type="button"
           onClick={() => setActiveTab("qrcode")}
-          className={`min-h-[42px] px-4 rounded-xl text-xs sm:text-sm font-bold inline-flex items-center gap-2 cursor-pointer ${
-            activeTab === "qrcode"
+          className={`min-h-[42px] px-4 rounded-xl text-xs sm:text-sm font-bold inline-flex items-center gap-2 cursor-pointer ${activeTab === "qrcode"
               ? "bg-[#0F766E] text-white shadow-xs"
               : "bg-white border border-slate-200 text-slate-700 hover:bg-slate-50"
-          }`}
+            }`}
         >
           <QrCode className="w-4 h-4" />
           <span>สร้าง QR Code จุดเริ่มต้น</span>
@@ -356,11 +351,10 @@ export default function AdminSettingsPage() {
         <button
           type="button"
           onClick={() => setActiveTab("backup")}
-          className={`min-h-[42px] px-4 rounded-xl text-xs sm:text-sm font-bold inline-flex items-center gap-2 cursor-pointer ${
-            activeTab === "backup"
+          className={`min-h-[42px] px-4 rounded-xl text-xs sm:text-sm font-bold inline-flex items-center gap-2 cursor-pointer ${activeTab === "backup"
               ? "bg-[#0F766E] text-white shadow-xs"
               : "bg-white border border-slate-200 text-slate-700 hover:bg-slate-50"
-          }`}
+            }`}
         >
           <DatabaseBackup className="w-4 h-4" />
           <span>สำรองข้อมูล JSON</span>
@@ -435,11 +429,10 @@ export default function AdminSettingsPage() {
                     </td>
                     <td className="py-3 px-4">
                       <span
-                        className={`inline-flex px-2 py-0.5 rounded-full text-xs font-bold ${
-                          cat.show_in_legend
+                        className={`inline-flex px-2 py-0.5 rounded-full text-xs font-bold ${cat.show_in_legend
                             ? "bg-[#CCFBF1] text-[#047857]"
                             : "bg-slate-100 text-slate-500"
-                        }`}
+                          }`}
                       >
                         {cat.show_in_legend ? "แสดง" : "ไม่แสดง"}
                       </span>
@@ -532,11 +525,10 @@ export default function AdminSettingsPage() {
                           {st.label}
                         </span>
                         <span
-                          className={`inline-flex px-2 py-0.5 rounded-full text-[11px] font-bold ${
-                            ann.is_active
+                          className={`inline-flex px-2 py-0.5 rounded-full text-[11px] font-bold ${ann.is_active
                               ? "bg-[#CCFBF1] text-[#047857]"
                               : "bg-slate-200 text-slate-600"
-                          }`}
+                            }`}
                         >
                           {ann.is_active ? "กำลังแสดง" : "ปิดไว้"}
                         </span>
@@ -1052,11 +1044,10 @@ export default function AdminSettingsPage() {
       {/* Toast */}
       {toast && (
         <div
-          className={`fixed bottom-5 right-5 z-[1200] max-w-sm rounded-2xl px-4 py-3 shadow-lg border flex items-center gap-2.5 text-sm font-semibold ${
-            toast.type === "success"
+          className={`fixed bottom-5 right-5 z-[1200] max-w-sm rounded-2xl px-4 py-3 shadow-lg border flex items-center gap-2.5 text-sm font-semibold ${toast.type === "success"
               ? "bg-[#0F766E] text-white border-teal-700"
               : "bg-[#FFE4E6] text-[#BE123C] border-rose-200"
-          }`}
+            }`}
         >
           {toast.type === "success" ? (
             <CheckCircle2 className="w-5 h-5 shrink-0" />

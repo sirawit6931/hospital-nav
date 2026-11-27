@@ -15,9 +15,11 @@ import {
   LocateFixed,
   Map as MapIcon,
   Navigation,
+  Orbit,
   Pause,
   Play,
   RotateCcw,
+  RotateCw,
   X,
 } from "lucide-react";
 import type { Category, MapNode, RouteResponse } from "@/lib/api";
@@ -82,6 +84,8 @@ interface Public3DMapProps {
 const DEFAULT_3D_CENTER: [number, number] = [104.1581, 17.1633]; // [lng, lat]
 const DEFAULT_3D_ZOOM = 17;
 const DEFAULT_3D_PITCH = 52;
+const CUBIC_EASE_OUT = (t: number) => 1 - Math.pow(1 - t, 3);
+const ROUTE_FIT_PADDING = { top: 76, bottom: 72, left: 64, right: 72 };
 const DEFAULT_3D_BEARING = -18;
 
 // Verified free CORS-enabled Thai PBF glyphs (Noto Sans Regular / Bold with Thai 0E00-0E7F)
@@ -164,7 +168,9 @@ export default function Public3DMap({
     null
   );
   const [mapReady, setMapReady] = useState(false);
-  const [isTilted3D, setIsTilted3D] = useState(true);
+  const [isTilted3D, setIsTilted3D] = useState(false);
+  const [orbitMode, setOrbitMode] = useState(false);
+  const [bearingDeg, setBearingDeg] = useState(0);
   const [forceTranslucent, setForceTranslucent] = useState(false);
   const [controlsOpen, setControlsOpen] = useState(false);
   const [legendOpen, setLegendOpen] = useState(false);
@@ -299,14 +305,17 @@ export default function Public3DMap({
       container: containerRef.current,
       center: dataset.meta.center || DEFAULT_3D_CENTER,
       zoom: DEFAULT_3D_ZOOM,
-      pitch: DEFAULT_3D_PITCH,
-      bearing: DEFAULT_3D_BEARING,
-      minZoom: 16.5,
+      pitch: 0,
+      bearing: 0,
+      minZoom: 15.8,
       maxZoom: 20,
-      maxPitch: 68,
+      maxPitch: 75,
+      dragRotate: true,
+      pitchWithRotate: true,
+      touchPitch: true,
       maxBounds: [
-        [104.1550, 17.1605],
-        [104.1610, 17.1657],
+        [104.1490, 17.1555],
+        [104.1670, 17.1710],
       ],
       attributionControl: false,
       style: {
@@ -843,6 +852,11 @@ export default function Public3DMap({
       setMapReady(true);
     });
 
+    map.on("rotate", () => {
+      const b = ((Math.round(map.getBearing()) % 360) + 360) % 360;
+      setBearingDeg(b);
+    });
+
     // Disengage auto-follow when user manually pans/drags or rotates the map
     map.on("dragstart", (e) => {
       if (e.originalEvent) {
@@ -972,8 +986,7 @@ export default function Public3DMap({
     } as unknown as GeoJSON.FeatureCollection);
   }, [boundBuildings, mapReady]);
 
-  // Sync Active Route Polyline (splits into faded passedPath + bright remainingPath during Active Navigation)
-  const prevFittedRouteKeyRef = useRef<string | null>(null);
+  // 1. Sync Active Route Polyline Data (pure setData — never touches camera or recreates layers)
   useEffect(() => {
     const map = mapRef.current;
     if (!map || !mapReady) return;
@@ -1000,29 +1013,29 @@ export default function Public3DMap({
         routeSrc.setData(
           remCoords.length >= 2
             ? {
-              type: "FeatureCollection",
-              features: [
-                {
-                  type: "Feature",
-                  properties: {},
-                  geometry: { type: "LineString", coordinates: remCoords },
-                },
-              ],
-            }
+                type: "FeatureCollection",
+                features: [
+                  {
+                    type: "Feature",
+                    properties: {},
+                    geometry: { type: "LineString", coordinates: remCoords },
+                  },
+                ],
+              }
             : EMPTY_FC
         );
         passedSrc?.setData(
           passCoords.length >= 2
             ? {
-              type: "FeatureCollection",
-              features: [
-                {
-                  type: "Feature",
-                  properties: {},
-                  geometry: { type: "LineString", coordinates: passCoords },
-                },
-              ],
-            }
+                type: "FeatureCollection",
+                features: [
+                  {
+                    type: "Feature",
+                    properties: {},
+                    geometry: { type: "LineString", coordinates: passCoords },
+                  },
+                ],
+              }
             : EMPTY_FC
         );
       } else {
@@ -1041,40 +1054,66 @@ export default function Public3DMap({
             },
           ],
         });
-
-        const routeKey = `${routeData?.target_building?.id}-${path.length}-${Math.round(
-          routeData?.total_distance_m ?? 0
-        )}`;
-        if (!mockGpsEnabled && prevFittedRouteKeyRef.current !== routeKey) {
-          prevFittedRouteKeyRef.current = routeKey;
-          const bounds = new maplibregl.LngLatBounds();
-          for (const c of lngLatCoords) {
-            bounds.extend(c as [number, number]);
-          }
-          map.fitBounds(bounds, {
-            padding: 72,
-            maxZoom: 18.4,
-            pitch: isTilted3D ? DEFAULT_3D_PITCH : 0,
-            duration: 750,
-          });
-        }
       }
     } else {
-      prevFittedRouteKeyRef.current = null;
       routeSrc.setData(EMPTY_FC);
       passedSrc?.setData(EMPTY_FC);
     }
-  }, [routeData, isNavigating, navProgress, mapReady, mockGpsEnabled, isTilted3D]);
+  }, [routeData, isNavigating, navProgress, mapReady]);
 
-  // Sync Target Destination Pulsing Pin
+  // 2. Single-Shot Smooth Camera Fit when a new Route arrives (never re-runs on GPS jitter or tilt changes)
+  const prevFittedRouteKeyRef = useRef<string | null>(null);
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !mapReady || isNavigating || mockGpsEnabled) return;
+
+    const path = routeData?.path ?? null;
+    if (!path || path.length < 2) {
+      prevFittedRouteKeyRef.current = null;
+      return;
+    }
+
+    const routeKey = `${routeData?.target_building?.id ?? "none"}-${
+      routeData?.start_node?.id ?? "gps"
+    }-${Math.round(routeData?.total_distance_m ?? 0)}`;
+    if (prevFittedRouteKeyRef.current === routeKey) return;
+    prevFittedRouteKeyRef.current = routeKey;
+
+    const bounds = new maplibregl.LngLatBounds();
+    for (const [lat, lng] of path) {
+      bounds.extend([lng, lat]);
+    }
+
+    map.stop();
+    map.fitBounds(bounds, {
+      padding: ROUTE_FIT_PADDING,
+      maxZoom: 18.5,
+      pitch: map.getPitch(),
+      bearing: map.getBearing(),
+      duration: 650,
+      easing: CUBIC_EASE_OUT,
+      essential: true,
+    });
+  }, [routeData, mapReady, isNavigating, mockGpsEnabled]);
+
+  // Sync Target Destination Pulsing Pin (reuse existing Marker instance to prevent flicker)
   useEffect(() => {
     const map = mapRef.current;
     if (!map || !mapReady) return;
 
-    targetMarkerRef.current?.remove();
-    targetMarkerRef.current = null;
+    if (!targetBuilding) {
+      targetMarkerRef.current?.remove();
+      targetMarkerRef.current = null;
+      return;
+    }
 
-    if (!targetBuilding) return;
+    if (targetMarkerRef.current) {
+      targetMarkerRef.current.setLngLat([
+        targetBuilding.lng,
+        targetBuilding.lat,
+      ]);
+      return;
+    }
 
     const el = document.createElement("div");
     el.className = "pointer-events-none";
@@ -1212,16 +1251,19 @@ export default function Public3DMap({
     mapReady,
   ]);
 
-  // Immediately fly to user's live GPS location when "ตำแหน่งฉัน" is tapped
+  // Immediately pan to user's live GPS location when "ตำแหน่งฉัน" is tapped
   useEffect(() => {
     const map = mapRef.current;
     if (!map || !mapReady || locateTrigger <= 0) return;
+    map.stop();
     map.easeTo({
       center: [displayOriginCoords[1], displayOriginCoords[0]],
-      zoom: Math.max(map.getZoom(), 18.2),
-      pitch: isTilted3D ? DEFAULT_3D_PITCH : 0,
+      zoom: Math.min(Math.max(map.getZoom(), 18.0), 18.5),
+      pitch: map.getPitch(),
       bearing: headingUpMode ? userHeadingDeg : map.getBearing(),
-      duration: 600,
+      duration: 650,
+      easing: CUBIC_EASE_OUT,
+      essential: true,
     });
     // Only trigger on explicit locate button taps
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -1247,10 +1289,11 @@ export default function Public3DMap({
         essential: true,
       });
     } else if (!isNavigating && prevIsNavigatingRef.current) {
+      setIsTilted3D(false);
       map.easeTo({
         zoom: 17.5,
-        pitch: DEFAULT_3D_PITCH,
-        bearing: DEFAULT_3D_BEARING,
+        pitch: 0,
+        bearing: 0,
         duration: 650,
         essential: true,
       });
@@ -1323,26 +1366,127 @@ export default function Public3DMap({
     });
   }, [userHeadingDeg, followUser, headingUpMode, isNavigating, mapReady]);
 
-  // Smooth camera focus when selecting a building card
+  // Smooth single-move camera focus when peeking at a building card (skipped if already routing to it)
   useEffect(() => {
     const map = mapRef.current;
     if (!map || !mapReady || !focusedNode) return;
-    map.flyTo({
+    if (targetBuilding?.id === focusedNode.id) return;
+    map.stop();
+    map.easeTo({
       center: [focusedNode.lng, focusedNode.lat],
-      zoom: 17.8,
-      pitch: isTilted3D ? DEFAULT_3D_PITCH : 0,
+      zoom: Math.min(Math.max(map.getZoom(), 17.6), 18.5),
+      pitch: map.getPitch(),
+      bearing: map.getBearing(),
       duration: 650,
+      easing: CUBIC_EASE_OUT,
+      essential: true,
     });
-  }, [focusedNode, mapReady, isTilted3D]);
+  }, [focusedNode, targetBuilding?.id, mapReady]);
+
+  // Desktop 360° Orbit Mode (Left-click drag when orbitMode is ON, or Middle-click / Shift+Left drag anytime) + Q/E keys
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !mapReady || isNavigating) return;
+    const canvas = map.getCanvas();
+
+    if (orbitMode) {
+      map.dragPan.disable();
+      canvas.style.cursor = "grab";
+    } else {
+      map.dragPan.enable();
+      canvas.style.cursor = mockGpsEnabled ? "crosshair" : "";
+    }
+
+    let dragging = false;
+    let lastX = 0;
+    let lastY = 0;
+
+    const onPointerDown = (e: PointerEvent) => {
+      const isLeftOrbit = orbitMode && e.button === 0;
+      const isMiddleOrShift = e.button === 1 || (e.button === 0 && e.shiftKey);
+      if (!isLeftOrbit && !isMiddleOrShift) return;
+
+      dragging = true;
+      lastX = e.clientX;
+      lastY = e.clientY;
+      map.stop();
+      map.dragPan.disable();
+      canvas.style.cursor = "grabbing";
+      e.preventDefault();
+    };
+
+    const onPointerMove = (e: PointerEvent) => {
+      if (!dragging) return;
+      const dx = e.clientX - lastX;
+      const dy = e.clientY - lastY;
+      lastX = e.clientX;
+      lastY = e.clientY;
+      const nextBearing = map.getBearing() + dx * 0.45;
+      const nextPitch = Math.max(0, Math.min(75, map.getPitch() - dy * 0.35));
+      map.jumpTo({ bearing: nextBearing, pitch: nextPitch });
+    };
+
+    const onPointerUp = () => {
+      if (!dragging) return;
+      dragging = false;
+      if (!orbitMode) {
+        map.dragPan.enable();
+        canvas.style.cursor = mockGpsEnabled ? "crosshair" : "";
+      } else {
+        canvas.style.cursor = "grab";
+      }
+    };
+
+    const onKeyDown = (e: KeyboardEvent) => {
+      const tag = (e.target as HTMLElement | null)?.tagName;
+      if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return;
+      if (e.key === "q" || e.key === "Q") {
+        map.stop();
+        map.easeTo({ bearing: map.getBearing() - 30, duration: 280, essential: true });
+      } else if (e.key === "e" || e.key === "E") {
+        map.stop();
+        map.easeTo({ bearing: map.getBearing() + 30, duration: 280, essential: true });
+      }
+    };
+
+    canvas.addEventListener("pointerdown", onPointerDown);
+    window.addEventListener("pointermove", onPointerMove);
+    window.addEventListener("pointerup", onPointerUp);
+    window.addEventListener("pointercancel", onPointerUp);
+    window.addEventListener("keydown", onKeyDown);
+
+    return () => {
+      canvas.removeEventListener("pointerdown", onPointerDown);
+      window.removeEventListener("pointermove", onPointerMove);
+      window.removeEventListener("pointerup", onPointerUp);
+      window.removeEventListener("pointercancel", onPointerUp);
+      window.removeEventListener("keydown", onKeyDown);
+      map.dragPan.enable();
+    };
+  }, [orbitMode, isNavigating, mockGpsEnabled, mapReady]);
+
+  const handleStepRotate = useCallback((deltaDeg: number) => {
+    const map = mapRef.current;
+    if (!map) return;
+    map.stop();
+    map.easeTo({
+      bearing: map.getBearing() + deltaDeg,
+      duration: 320,
+      essential: true,
+    });
+  }, []);
 
   const handleToggleTilt = useCallback(() => {
     const map = mapRef.current;
     setIsTilted3D((prev) => {
       const next = !prev;
+      map?.stop();
       map?.easeTo({
         pitch: next ? DEFAULT_3D_PITCH : 0,
         bearing: next ? DEFAULT_3D_BEARING : 0,
-        duration: 500,
+        duration: 650,
+        easing: CUBIC_EASE_OUT,
+        essential: true,
       });
       return next;
     });
@@ -1351,13 +1495,16 @@ export default function Public3DMap({
   const handleResetCampusView = useCallback(() => {
     const map = mapRef.current;
     if (!map) return;
-    setIsTilted3D(true);
+    setIsTilted3D(false);
+    map.stop();
     map.easeTo({
       center: dataset?.meta.center || DEFAULT_3D_CENTER,
       zoom: DEFAULT_3D_ZOOM,
-      pitch: DEFAULT_3D_PITCH,
-      bearing: DEFAULT_3D_BEARING,
+      pitch: 0,
+      bearing: 0,
       duration: 650,
+      easing: CUBIC_EASE_OUT,
+      essential: true,
     });
   }, [dataset]);
 
@@ -1787,19 +1934,59 @@ export default function Public3DMap({
             </div>
           )}
 
-          <button
-            type="button"
-            onClick={() => setLegendOpen((prev) => !prev)}
-            title="คำอธิบายสี"
-            aria-expanded={legendOpen}
-            className={`h-9 px-3 rounded-xl border shadow-sm text-xs font-semibold inline-flex items-center gap-1.5 transition-colors cursor-pointer ${legendOpen
-              ? "bg-[#0F766E] border-[#0F766E] text-white"
-              : "bg-white/95 backdrop-blur border-slate-200 text-slate-700 hover:bg-slate-50"
-              }`}
-          >
-            <Info className="w-3.5 h-3.5" />
-            <span>คำอธิบายสี</span>
-          </button>
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={() => setLegendOpen((prev) => !prev)}
+              title="คำอธิบายสี"
+              aria-expanded={legendOpen}
+              className={`h-9 px-3 rounded-xl border shadow-sm text-xs font-semibold inline-flex items-center gap-1.5 transition-colors cursor-pointer ${legendOpen
+                ? "bg-[#0F766E] border-[#0F766E] text-white"
+                : "bg-white/95 backdrop-blur border-slate-200 text-slate-700 hover:bg-slate-50"
+                }`}
+            >
+              <Info className="w-3.5 h-3.5" />
+              <span>คำอธิบายสี</span>
+            </button>
+
+            {/* Desktop 360° Free Orbit Controls */}
+            <div className="hidden md:inline-flex items-center rounded-xl bg-white/95 backdrop-blur border border-slate-200 shadow-sm p-0.5 gap-0.5">
+              <button
+                type="button"
+                onClick={() => handleStepRotate(-45)}
+                title="หมุนซ้าย 45° (คีย์ Q)"
+                aria-label="หมุนซ้าย 45 องศา"
+                className="w-8 h-8 rounded-lg hover:bg-slate-100 text-slate-700 flex items-center justify-center cursor-pointer"
+              >
+                <RotateCcw className="w-3.5 h-3.5" />
+              </button>
+              <button
+                type="button"
+                onClick={() => setOrbitMode((prev) => !prev)}
+                title="เปิดโหมดลากคลิกซ้ายเพื่อหมุนรอบ 360° และเอียงมุมมอง (หรือคลิกขวา/Shift+ลากได้ตลอด)"
+                className={`h-8 px-2.5 rounded-lg text-xs font-bold inline-flex items-center gap-1.5 transition-colors cursor-pointer ${
+                  orbitMode
+                    ? "bg-[#0F766E] text-white"
+                    : "text-slate-700 hover:bg-slate-100"
+                }`}
+              >
+                <Orbit className="w-3.5 h-3.5" />
+                <span>หมุน 360°</span>
+                <span className="tabular-nums opacity-80 text-[11px]">
+                  {bearingDeg}°
+                </span>
+              </button>
+              <button
+                type="button"
+                onClick={() => handleStepRotate(45)}
+                title="หมุนขวา 45° (คีย์ E)"
+                aria-label="หมุนขวา 45 องศา"
+                className="w-8 h-8 rounded-lg hover:bg-slate-100 text-slate-700 flex items-center justify-center cursor-pointer"
+              >
+                <RotateCw className="w-3.5 h-3.5" />
+              </button>
+            </div>
+          </div>
         </div>
       )}
     </div>
