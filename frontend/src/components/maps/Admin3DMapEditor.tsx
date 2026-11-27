@@ -13,7 +13,11 @@ import {
 } from "lucide-react";
 import type { MapEdge, MapNode, SurveyTrack } from "@/lib/api";
 import {
+  apply3DOverrides,
   bindMapNodesTo3DBuildings,
+  type Building3DOverride,
+  type Building3DProps,
+  type Map3DOverridesPayload,
   type MapViewMode,
   type SakonHospital3DDataset,
 } from "@/lib/hospital3d";
@@ -28,6 +32,15 @@ interface Admin3DMapEditorProps {
   surveys: SurveyTrack[];
   showSurveys: boolean;
   selectedSourceNodeId: number | null;
+  overrides3D?: Map3DOverridesPayload | null;
+  selectedBuilding3DId?: string | null;
+  selected3D?: Building3DOverride | null;
+  showSatelliteUnderlay?: boolean;
+  buildingOpacity?: number;
+  onSelectBuilding3D?: (building: Building3DProps | null) => void;
+  onBeginTransform3D?: () => void;
+  onLiveTransform3D?: (patch: Partial<Building3DOverride>) => void;
+  onMapCenterChange?: (lat: number, lng: number) => void;
   onMapClick: (lat: number, lng: number) => void;
   onNodeClick: (node: MapNode) => void;
   onEdgeClick: (edge: MapEdge) => void;
@@ -47,6 +60,44 @@ const EMPTY_FC: GeoJSON.FeatureCollection = {
 
 let cachedAdmin3DDataset: SakonHospital3DDataset | null = null;
 
+function localOffsetToLngLat(
+  centerLat: number,
+  centerLng: number,
+  angleDeg: number,
+  lx: number,
+  ly: number
+): [number, number] {
+  const rad = (angleDeg * Math.PI) / 180;
+  const cosA = Math.cos(rad);
+  const sinA = Math.sin(rad);
+  const cosLat = Math.cos((centerLat * Math.PI) / 180);
+  const rx = lx * cosA - ly * sinA;
+  const ry = lx * sinA + ly * cosA;
+  return [
+    centerLng + rx / (111320 * cosLat),
+    centerLat + ry / 111320,
+  ];
+}
+
+function lngLatToLocalMeters(
+  centerLat: number,
+  centerLng: number,
+  angleDeg: number,
+  lng: number,
+  lat: number
+): { lx: number; ly: number } {
+  const cosLat = Math.cos((centerLat * Math.PI) / 180);
+  const dx = (lng - centerLng) * 111320 * cosLat;
+  const dy = (lat - centerLat) * 111320;
+  const rad = (-angleDeg * Math.PI) / 180;
+  const cosA = Math.cos(rad);
+  const sinA = Math.sin(rad);
+  return {
+    lx: dx * cosA - dy * sinA,
+    ly: dx * sinA + dy * cosA,
+  };
+}
+
 export default function Admin3DMapEditor({
   mapViewMode,
   onChangeMapViewMode,
@@ -56,6 +107,15 @@ export default function Admin3DMapEditor({
   surveys,
   showSurveys,
   selectedSourceNodeId,
+  overrides3D,
+  selectedBuilding3DId,
+  selected3D,
+  showSatelliteUnderlay = false,
+  buildingOpacity = 0.92,
+  onSelectBuilding3D,
+  onBeginTransform3D,
+  onLiveTransform3D,
+  onMapCenterChange,
   onMapClick,
   onNodeClick,
   onEdgeClick,
@@ -63,19 +123,26 @@ export default function Admin3DMapEditor({
   const containerRef = useRef<HTMLDivElement | null>(null);
   const mapRef = useRef<maplibregl.Map | null>(null);
   const nodeMarkersRef = useRef<maplibregl.Marker[]>([]);
+  const handleMarkersRef = useRef<maplibregl.Marker[]>([]);
 
   const [dataset, setDataset] = useState<SakonHospital3DDataset | null>(
     cachedAdmin3DDataset
   );
   const [mapReady, setMapReady] = useState(false);
   const [isTilted3D, setIsTilted3D] = useState(true);
-  const [translucentBuildings, setTranslucentBuildings] = useState(true);
+  const [translucentBuildings, setTranslucentBuildings] = useState(false);
 
   const modeRef = useRef(mode);
   const onMapClickRef = useRef(onMapClick);
   const onNodeClickRef = useRef(onNodeClick);
   const onEdgeClickRef = useRef(onEdgeClick);
+  const onSelectBuilding3DRef = useRef(onSelectBuilding3D);
+  const onBeginTransform3DRef = useRef(onBeginTransform3D);
+  const onLiveTransform3DRef = useRef(onLiveTransform3D);
+  const onMapCenterChangeRef = useRef(onMapCenterChange);
+  const selected3DRef = useRef<Building3DOverride | null>(selected3D ?? null);
   const edgesByIdRef = useRef<Map<number, MapEdge>>(new Map());
+  const buildingPropsByIdRef = useRef<Map<string, Building3DProps>>(new Map());
 
   useEffect(() => {
     modeRef.current = mode;
@@ -92,6 +159,26 @@ export default function Admin3DMapEditor({
   useEffect(() => {
     onEdgeClickRef.current = onEdgeClick;
   }, [onEdgeClick]);
+
+  useEffect(() => {
+    onSelectBuilding3DRef.current = onSelectBuilding3D;
+  }, [onSelectBuilding3D]);
+
+  useEffect(() => {
+    onBeginTransform3DRef.current = onBeginTransform3D;
+  }, [onBeginTransform3D]);
+
+  useEffect(() => {
+    onLiveTransform3DRef.current = onLiveTransform3D;
+  }, [onLiveTransform3D]);
+
+  useEffect(() => {
+    onMapCenterChangeRef.current = onMapCenterChange;
+  }, [onMapCenterChange]);
+
+  useEffect(() => {
+    selected3DRef.current = selected3D ?? null;
+  }, [selected3D]);
 
   useEffect(() => {
     const m = new Map<number, MapEdge>();
@@ -127,14 +214,33 @@ export default function Admin3DMapEditor({
 
   const boundBuildings = useMemo(() => {
     if (!dataset) return null;
+    const effectiveDataset = apply3DOverrides(dataset, overrides3D);
     return bindMapNodesTo3DBuildings(
-      dataset,
+      effectiveDataset,
       buildingNodes,
       null,
       null,
-      translucentBuildings
+      translucentBuildings && mode !== "customize_3d",
+      selectedBuilding3DId ?? null
     );
-  }, [dataset, buildingNodes, translucentBuildings]);
+  }, [
+    dataset,
+    overrides3D,
+    buildingNodes,
+    translucentBuildings,
+    mode,
+    selectedBuilding3DId,
+  ]);
+
+  useEffect(() => {
+    const m = new Map<string, Building3DProps>();
+    if (boundBuildings) {
+      for (const f of boundBuildings.features) {
+        m.set(f.properties.id, f.properties);
+      }
+    }
+    buildingPropsByIdRef.current = m;
+  }, [boundBuildings]);
 
   const nodeById = useMemo(() => {
     const m = new Map<number, MapNode>();
@@ -172,6 +278,14 @@ export default function Admin3DMapEditor({
           position: [1.5, 200, 42],
         },
         sources: {
+          satelliteUnderlay: {
+            type: "raster",
+            tiles: [
+              "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
+            ],
+            tileSize: 256,
+            maxzoom: 18,
+          },
           campus: {
             type: "geojson",
             data: dataset.campus as unknown as GeoJSON.FeatureCollection,
@@ -197,6 +311,11 @@ export default function Admin3DMapEditor({
             data: (dataset.covered_walkway_lines ||
               EMPTY_FC) as unknown as GeoJSON.FeatureCollection,
           },
+          trees: {
+            type: "geojson",
+            data: (dataset.trees ||
+              EMPTY_FC) as unknown as GeoJSON.FeatureCollection,
+          },
           buildings: {
             type: "geojson",
             data: dataset.buildings as unknown as GeoJSON.FeatureCollection,
@@ -207,12 +326,20 @@ export default function Admin3DMapEditor({
           },
           adminEdges: { type: "geojson", data: EMPTY_FC },
           adminSurveys: { type: "geojson", data: EMPTY_FC },
+          transformGuides: { type: "geojson", data: EMPTY_FC },
         },
         layers: [
           {
             id: "bg-canvas",
             type: "background",
             paint: { "background-color": "#E6EDF4" },
+          },
+          // Optional Esri Satellite Underlay (toggled in Mode 6 to trace real rooftops!)
+          {
+            id: "satellite-underlay",
+            type: "raster",
+            source: "satelliteUnderlay",
+            paint: { "raster-opacity": 0 },
           },
           {
             id: "campus-ground",
@@ -316,17 +443,55 @@ export default function Admin3DMapEditor({
               "line-opacity": 0,
             },
           },
-          // Solid 3D Buildings (opacity 0.88)
+          // Crisp architectural footprint outlines & stylized 3D trees
+          {
+            id: "buildings-outline",
+            type: "line",
+            source: "buildings",
+            paint: {
+              "line-color": [
+                "case",
+                ["boolean", ["get", "is_selected"], false],
+                "#0EA5E9",
+                "#475569",
+              ],
+              "line-width": [
+                "case",
+                ["boolean", ["get", "is_selected"], false],
+                3.5,
+                1.1,
+              ],
+              "line-opacity": 0.75,
+            },
+          },
+          {
+            id: "trees-3d",
+            type: "fill-extrusion",
+            source: "trees",
+            paint: {
+              "fill-extrusion-color": ["coalesce", ["get", "color"], "#4D9A3D"],
+              "fill-extrusion-height": ["coalesce", ["get", "height"], 6],
+              "fill-extrusion-base": ["coalesce", ["get", "base_height"], 2],
+              "fill-extrusion-opacity": 0.88,
+              "fill-extrusion-vertical-gradient": true,
+            },
+          },
+          // Solid 3D Buildings (opacity 0.92; highlights selected building in customize_3d mode)
           {
             id: "buildings-3d-solid",
             type: "fill-extrusion",
             source: "buildings",
             filter: ["!=", ["get", "route_through"], true],
             paint: {
-              "fill-extrusion-color": ["coalesce", ["get", "color"], "#94A3B8"],
+              "fill-extrusion-color": [
+                "case",
+                ["boolean", ["get", "is_selected"], false],
+                "#0EA5E9",
+                ["coalesce", ["get", "color"], "#94A3B8"],
+              ],
               "fill-extrusion-height": ["coalesce", ["get", "height"], 12],
-              "fill-extrusion-base": 0,
-              "fill-extrusion-opacity": 0.88,
+              "fill-extrusion-base": ["coalesce", ["get", "base_height"], 0],
+              "fill-extrusion-opacity": 0.92,
               "fill-extrusion-vertical-gradient": true,
             },
           },
@@ -337,11 +502,27 @@ export default function Admin3DMapEditor({
             source: "buildings",
             filter: ["==", ["get", "route_through"], true],
             paint: {
-              "fill-extrusion-color": ["coalesce", ["get", "color"], "#94A3B8"],
+              "fill-extrusion-color": [
+                "case",
+                ["boolean", ["get", "is_selected"], false],
+                "#0EA5E9",
+                ["coalesce", ["get", "color"], "#94A3B8"],
+              ],
               "fill-extrusion-height": ["coalesce", ["get", "height"], 12],
-              "fill-extrusion-base": 0,
+              "fill-extrusion-base": ["coalesce", ["get", "base_height"], 0],
               "fill-extrusion-opacity": 0.35,
               "fill-extrusion-vertical-gradient": true,
+            },
+          },
+          // Rotate stem / transform guide line for Mode 6 selected building
+          {
+            id: "transform-guides-line",
+            type: "line",
+            source: "transformGuides",
+            paint: {
+              "line-color": "#059669",
+              "line-width": 2.4,
+              "line-dasharray": [2, 1.5],
             },
           },
           // Building Names Symbol Layer (Primary buildings cleanly labeled)
@@ -376,6 +557,13 @@ export default function Admin3DMapEditor({
 
     map.on("load", () => {
       setMapReady(true);
+      const c = map.getCenter();
+      onMapCenterChangeRef.current?.(c.lat, c.lng);
+    });
+
+    map.on("moveend", () => {
+      const c = map.getCenter();
+      onMapCenterChangeRef.current?.(c.lat, c.lng);
     });
 
     map.on("mouseenter", "admin-edges-hitbox", () => {
@@ -401,9 +589,43 @@ export default function Admin3DMapEditor({
       }
     });
 
+    // Click any 3D building/wing in customize_3d mode to select & stretch/extrude it
+    for (const bLayer of ["buildings-3d-solid", "buildings-3d-translucent"]) {
+      map.on("mouseenter", bLayer, () => {
+        if (modeRef.current === "customize_3d") {
+          map.getCanvas().style.cursor = "pointer";
+        }
+      });
+      map.on("mouseleave", bLayer, () => {
+        if (modeRef.current === "customize_3d") {
+          map.getCanvas().style.cursor = "crosshair";
+        }
+      });
+      map.on("click", bLayer, (e) => {
+        if (modeRef.current !== "customize_3d") return;
+        const feat = e.features?.[0];
+        if (!feat) return;
+        const bId = feat.properties?.id ? String(feat.properties.id) : null;
+        if (!bId) return;
+        const fullProps =
+          buildingPropsByIdRef.current.get(bId) ||
+          (feat.properties as unknown as Building3DProps);
+        onSelectBuilding3DRef.current?.(fullProps);
+      });
+    }
+
     map.on("click", (e) => {
-      if (modeRef.current !== "add_node") return;
-      onMapClickRef.current(e.lngLat.lat, e.lngLat.lng);
+      if (modeRef.current === "add_node") {
+        onMapClickRef.current(e.lngLat.lat, e.lngLat.lng);
+        return;
+      }
+      if (modeRef.current === "customize_3d") {
+        const hits = map.queryRenderedFeatures(e.point, {
+          layers: ["buildings-3d-solid", "buildings-3d-translucent"],
+        });
+        if (hits.length > 0) return;
+        onMapClickRef.current(e.lngLat.lat, e.lngLat.lng);
+      }
     });
 
     mapRef.current = map;
@@ -417,17 +639,373 @@ export default function Admin3DMapEditor({
       resizeObserver.disconnect();
       for (const m of nodeMarkersRef.current) m.remove();
       nodeMarkersRef.current = [];
+      for (const m of handleMarkersRef.current) m.remove();
+      handleMarkersRef.current = [];
       map.remove();
       mapRef.current = null;
       setMapReady(false);
     };
   }, [dataset]);
 
+  // Sync Satellite Underlay & Live 3D Building Opacity (Mode 6 rooftop alignment helper)
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !mapReady) return;
+
+    const satOn = mode === "customize_3d" && showSatelliteUnderlay;
+    if (map.getLayer("satellite-underlay")) {
+      map.setPaintProperty("satellite-underlay", "raster-opacity", satOn ? 1 : 0);
+    }
+    if (map.getLayer("campus-ground")) {
+      map.setPaintProperty("campus-ground", "fill-opacity", satOn ? 0 : 1);
+    }
+    if (map.getLayer("greens-fill")) {
+      map.setPaintProperty("greens-fill", "fill-opacity", satOn ? 0 : 0.8);
+    }
+    if (map.getLayer("water-fill")) {
+      map.setPaintProperty("water-fill", "fill-opacity", satOn ? 0 : 0.92);
+    }
+    if (map.getLayer("parking-fill")) {
+      map.setPaintProperty("parking-fill", "fill-opacity", satOn ? 0 : 0.9);
+    }
+    if (map.getLayer("roads-internal")) {
+      map.setPaintProperty("roads-internal", "line-opacity", satOn ? 0.25 : 1);
+    }
+    if (map.getLayer("buildings-3d-solid")) {
+      const targetOpacity =
+        mode === "customize_3d"
+          ? Math.max(0.2, Math.min(1, buildingOpacity))
+          : 0.92;
+      map.setPaintProperty(
+        "buildings-3d-solid",
+        "fill-extrusion-opacity",
+        targetOpacity
+      );
+    }
+  }, [mode, showSatelliteUnderlay, buildingOpacity, mapReady]);
+
+  // Interactive 3D Transform Handles (Move + 4 Edge Resize + Rotate) in Mode 6
+  const selectedIdForHandles = mode === "customize_3d" ? selected3D?.id ?? null : null;
+
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !mapReady) return;
+
+    for (const m of handleMarkersRef.current) m.remove();
+    handleMarkersRef.current = [];
+
+    if (!selectedIdForHandles || !selected3DRef.current) {
+      const gSrc = map.getSource("transformGuides") as
+        | maplibregl.GeoJSONSource
+        | undefined;
+      gSrc?.setData(EMPTY_FC);
+      return;
+    }
+
+    const startPointerDrag = (
+      ev: PointerEvent,
+      onMoveLngLat: (lngLat: maplibregl.LngLat, startLngLat: maplibregl.LngLat, snap: Building3DOverride) => void
+    ) => {
+      const snap = selected3DRef.current;
+      if (!snap) return;
+      ev.stopPropagation();
+      ev.preventDefault();
+
+      const canvas = map.getCanvas();
+      const rect = canvas.getBoundingClientRect();
+      const startLngLat = map.unproject([
+        ev.clientX - rect.left,
+        ev.clientY - rect.top,
+      ]);
+
+      map.dragPan.disable();
+      map.dragRotate.disable();
+      onBeginTransform3DRef.current?.();
+
+      const handleMove = (moveEv: PointerEvent) => {
+        moveEv.preventDefault();
+        const currRect = canvas.getBoundingClientRect();
+        const currLngLat = map.unproject([
+          moveEv.clientX - currRect.left,
+          moveEv.clientY - currRect.top,
+        ]);
+        onMoveLngLat(currLngLat, startLngLat, snap);
+      };
+
+      const handleUp = () => {
+        window.removeEventListener("pointermove", handleMove);
+        window.removeEventListener("pointerup", handleUp);
+        window.removeEventListener("pointercancel", handleUp);
+        map.dragPan.enable();
+        map.dragRotate.enable();
+      };
+
+      window.addEventListener("pointermove", handleMove, { passive: false });
+      window.addEventListener("pointerup", handleUp);
+      window.addEventListener("pointercancel", handleUp);
+    };
+
+    const createHandleMarker = (
+      html: string,
+      title: string,
+      sizePx: number,
+      onDrag: (lngLat: maplibregl.LngLat, startLngLat: maplibregl.LngLat, snap: Building3DOverride) => void
+    ) => {
+      const el = document.createElement("div");
+      el.title = title;
+      el.style.width = `${sizePx}px`;
+      el.style.height = `${sizePx}px`;
+      el.style.touchAction = "none";
+      el.className = "flex items-center justify-center select-none";
+      el.innerHTML = html;
+      el.addEventListener("pointerdown", (ev) => startPointerDrag(ev, onDrag));
+      el.addEventListener("click", (ev) => ev.stopPropagation());
+      const marker = new maplibregl.Marker({ element: el, anchor: "center" })
+        .setLngLat([
+          selected3DRef.current!.center_lng,
+          selected3DRef.current!.center_lat,
+        ])
+        .addTo(map);
+      return marker;
+    };
+
+    // 0: Center Move Handle (Blue circle with 4-way arrows SVG)
+    const moveMarker = createHandleMarker(
+      `<div style="width:32px;height:32px;border-radius:9999px;background:#0284C7;border:2.5px solid #FFFFFF;box-shadow:0 3px 10px rgba(15,23,42,0.45);display:flex;align-items:center;justify-content:center;cursor:move;">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#FFFFFF" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><polyline points="5 9 2 12 5 15"/><polyline points="9 5 12 2 15 5"/><polyline points="15 19 12 22 9 19"/><polyline points="19 9 22 12 19 15"/><line x1="2" y1="12" x2="22" y2="12"/><line x1="12" y1="2" x2="12" y2="22"/></svg>
+      </div>`,
+      "ลากเพื่อย้ายตำแหน่งบล็อก 3D",
+      32,
+      (curr, start, snap) => {
+        const dLng = curr.lng - start.lng;
+        const dLat = curr.lat - start.lat;
+        onLiveTransform3DRef.current?.({
+          center_lat: Number((snap.center_lat + dLat).toFixed(6)),
+          center_lng: Number((snap.center_lng + dLng).toFixed(6)),
+        });
+      }
+    );
+
+    const resizeHandleHtml = `<div style="width:18px;height:18px;border-radius:5px;background:#FFFFFF;border:2.5px solid #0284C7;box-shadow:0 2px 6px rgba(15,23,42,0.4);cursor:grab;"></div>`;
+
+    // 1: +W (Right/East local edge)
+    const rightMarker = createHandleMarker(
+      resizeHandleHtml,
+      "ลากเพื่อยืด-หดด้านขวา (ความกว้าง)",
+      22,
+      (curr, _start, snap) => {
+        const { lx } = lngLatToLocalMeters(
+          snap.center_lat,
+          snap.center_lng,
+          snap.angle_deg,
+          curr.lng,
+          curr.lat
+        );
+        const fixedLeft = -snap.width_m / 2;
+        const nextW = Math.max(3, Math.min(160, Math.round((lx - fixedLeft) * 2) / 2));
+        const shiftX = (nextW - snap.width_m) / 2;
+        const [nLng, nLat] = localOffsetToLngLat(
+          snap.center_lat,
+          snap.center_lng,
+          snap.angle_deg,
+          shiftX,
+          0
+        );
+        onLiveTransform3DRef.current?.({
+          width_m: nextW,
+          center_lat: Number(nLat.toFixed(6)),
+          center_lng: Number(nLng.toFixed(6)),
+        });
+      }
+    );
+
+    // 2: -W (Left/West local edge)
+    const leftMarker = createHandleMarker(
+      resizeHandleHtml,
+      "ลากเพื่อยืด-หดด้านซ้าย (ความกว้าง)",
+      22,
+      (curr, _start, snap) => {
+        const { lx } = lngLatToLocalMeters(
+          snap.center_lat,
+          snap.center_lng,
+          snap.angle_deg,
+          curr.lng,
+          curr.lat
+        );
+        const fixedRight = snap.width_m / 2;
+        const nextW = Math.max(3, Math.min(160, Math.round((fixedRight - lx) * 2) / 2));
+        const shiftX = -(nextW - snap.width_m) / 2;
+        const [nLng, nLat] = localOffsetToLngLat(
+          snap.center_lat,
+          snap.center_lng,
+          snap.angle_deg,
+          shiftX,
+          0
+        );
+        onLiveTransform3DRef.current?.({
+          width_m: nextW,
+          center_lat: Number(nLat.toFixed(6)),
+          center_lng: Number(nLng.toFixed(6)),
+        });
+      }
+    );
+
+    // 3: +D (Front/North local edge)
+    const frontMarker = createHandleMarker(
+      resizeHandleHtml,
+      "ลากเพื่อยืด-หดด้านหน้า (ความยาว)",
+      22,
+      (curr, _start, snap) => {
+        const { ly } = lngLatToLocalMeters(
+          snap.center_lat,
+          snap.center_lng,
+          snap.angle_deg,
+          curr.lng,
+          curr.lat
+        );
+        const fixedBack = -snap.depth_m / 2;
+        const nextD = Math.max(3, Math.min(160, Math.round((ly - fixedBack) * 2) / 2));
+        const shiftY = (nextD - snap.depth_m) / 2;
+        const [nLng, nLat] = localOffsetToLngLat(
+          snap.center_lat,
+          snap.center_lng,
+          snap.angle_deg,
+          0,
+          shiftY
+        );
+        onLiveTransform3DRef.current?.({
+          depth_m: nextD,
+          center_lat: Number(nLat.toFixed(6)),
+          center_lng: Number(nLng.toFixed(6)),
+        });
+      }
+    );
+
+    // 4: -D (Back/South local edge)
+    const backMarker = createHandleMarker(
+      resizeHandleHtml,
+      "ลากเพื่อยืด-หดด้านหลัง (ความยาว)",
+      22,
+      (curr, _start, snap) => {
+        const { ly } = lngLatToLocalMeters(
+          snap.center_lat,
+          snap.center_lng,
+          snap.angle_deg,
+          curr.lng,
+          curr.lat
+        );
+        const fixedFront = snap.depth_m / 2;
+        const nextD = Math.max(3, Math.min(160, Math.round((fixedFront - ly) * 2) / 2));
+        const shiftY = -(nextD - snap.depth_m) / 2;
+        const [nLng, nLat] = localOffsetToLngLat(
+          snap.center_lat,
+          snap.center_lng,
+          snap.angle_deg,
+          0,
+          shiftY
+        );
+        onLiveTransform3DRef.current?.({
+          depth_m: nextD,
+          center_lat: Number(nLat.toFixed(6)),
+          center_lng: Number(nLng.toFixed(6)),
+        });
+      }
+    );
+
+    // 5: Rotate Handle (Emerald circle 8m outside Front edge)
+    const rotateMarker = createHandleMarker(
+      `<div style="width:26px;height:26px;border-radius:9999px;background:#059669;border:2.5px solid #FFFFFF;box-shadow:0 3px 8px rgba(15,23,42,0.45);display:flex;align-items:center;justify-content:center;cursor:grab;">
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="#FFFFFF" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-9-9c2.52 0 4.93 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/></svg>
+      </div>`,
+      "ลากเพื่อหมุนองศาบล็อก 3D",
+      28,
+      (curr, _start, snap) => {
+        const cosLat = Math.cos((snap.center_lat * Math.PI) / 180);
+        const dx = (curr.lng - snap.center_lng) * 111320 * cosLat;
+        const dy = (curr.lat - snap.center_lat) * 111320;
+        if (Math.hypot(dx, dy) < 1) return;
+        const deg = Math.round((Math.atan2(-dx, dy) * 180) / Math.PI);
+        onLiveTransform3DRef.current?.({ angle_deg: deg });
+      }
+    );
+
+    handleMarkersRef.current = [
+      moveMarker,
+      rightMarker,
+      leftMarker,
+      frontMarker,
+      backMarker,
+      rotateMarker,
+    ];
+
+    return () => {
+      for (const m of handleMarkersRef.current) m.remove();
+      handleMarkersRef.current = [];
+    };
+  }, [selectedIdForHandles, mapReady]);
+
+  // Smoothly update handle positions & rotate guide stem whenever selected3D geometry updates
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !mapReady) return;
+    const gSrc = map.getSource("transformGuides") as
+      | maplibregl.GeoJSONSource
+      | undefined;
+
+    if (
+      mode !== "customize_3d" ||
+      !selected3D ||
+      handleMarkersRef.current.length < 6
+    ) {
+      gSrc?.setData(EMPTY_FC);
+      return;
+    }
+
+    const { center_lat, center_lng, width_m, depth_m, angle_deg } = selected3D;
+    const hw = width_m / 2;
+    const hd = depth_m / 2;
+
+    const pCenter: [number, number] = [center_lng, center_lat];
+    const pRight = localOffsetToLngLat(center_lat, center_lng, angle_deg, hw, 0);
+    const pLeft = localOffsetToLngLat(center_lat, center_lng, angle_deg, -hw, 0);
+    const pFront = localOffsetToLngLat(center_lat, center_lng, angle_deg, 0, hd);
+    const pBack = localOffsetToLngLat(center_lat, center_lng, angle_deg, 0, -hd);
+    const pRotate = localOffsetToLngLat(
+      center_lat,
+      center_lng,
+      angle_deg,
+      0,
+      hd + 8
+    );
+
+    handleMarkersRef.current[0].setLngLat(pCenter);
+    handleMarkersRef.current[1].setLngLat(pRight);
+    handleMarkersRef.current[2].setLngLat(pLeft);
+    handleMarkersRef.current[3].setLngLat(pFront);
+    handleMarkersRef.current[4].setLngLat(pBack);
+    handleMarkersRef.current[5].setLngLat(pRotate);
+
+    gSrc?.setData({
+      type: "FeatureCollection",
+      features: [
+        {
+          type: "Feature",
+          properties: {},
+          geometry: {
+            type: "LineString",
+            coordinates: [pFront, pRotate],
+          },
+        },
+      ],
+    });
+  }, [mode, selected3D, mapReady]);
+
   // Update cursor for active editing mode
   useEffect(() => {
     const map = mapRef.current;
     if (!map || !mapReady) return;
-    map.getCanvas().style.cursor = mode === "add_node" ? "crosshair" : "";
+    map.getCanvas().style.cursor =
+      mode === "add_node" || mode === "customize_3d" ? "crosshair" : "";
   }, [mode, mapReady]);
 
   // Sync 3D Buildings & Labels
@@ -532,6 +1110,9 @@ export default function Admin3DMapEditor({
 
     for (const m of nodeMarkersRef.current) m.remove();
     nodeMarkersRef.current = [];
+
+    // Hide node pins in customize_3d mode so clicking 3D buildings/wings is unobstructed
+    if (mode === "customize_3d") return;
 
     for (const node of nodes) {
       const isSelectedSource = selectedSourceNodeId === node.id;

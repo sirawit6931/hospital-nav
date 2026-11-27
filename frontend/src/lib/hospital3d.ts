@@ -51,12 +51,77 @@ export interface Building3DProps {
   color: string;
   source: string;
   has_helipad?: boolean;
+  is_wing?: boolean;
+  parent_id?: string | null;
+  width_m?: number;
+  depth_m?: number;
+  angle_deg?: number;
   center_lng: number;
   center_lat: number;
   linked_node_id?: number | null;
   is_target?: boolean;
+  is_selected?: boolean;
   route_through?: boolean;
+  user_inside?: boolean;
 }
+
+export interface Building3DOverride {
+  id: string;
+  name?: string;
+  short_name?: string;
+  center_lat: number;
+  center_lng: number;
+  width_m: number;
+  depth_m: number;
+  angle_deg: number;
+  height: number;
+  base_height: number;
+  color: string;
+  hidden?: boolean;
+  linked_node_id?: number | null;
+}
+
+export interface Custom3DPart {
+  id: string;
+  parent_id?: string;
+  name: string;
+  short_name: string;
+  is_wing: boolean;
+  center_lat: number;
+  center_lng: number;
+  width_m: number;
+  depth_m: number;
+  angle_deg: number;
+  height: number;
+  base_height: number;
+  color: string;
+  linked_node_id?: number | null;
+}
+
+export interface Map3DOverridesPayload {
+  overrides: Record<string, Building3DOverride>;
+  custom_parts: Custom3DPart[];
+}
+
+export const EMPTY_MAP_3D_OVERRIDES: Map3DOverridesPayload = {
+  overrides: {},
+  custom_parts: [],
+};
+
+export const WALL_MAP_COLOR_PRESETS: { label: string; color: string }[] = [
+  { label: "แดงฉุกเฉิน", color: "#A61B29" },
+  { label: "เหลืองร่มธรรม", color: "#EAB308" },
+  { label: "แดงเลือดหมูร่มเย็น", color: "#881337" },
+  { label: "ฟ้าหัวใจฯ", color: "#4A83B4" },
+  { label: "เขียวรังสีฯ", color: "#2E7D32" },
+  { label: "เขียวศัลยกรรม", color: "#65A30D" },
+  { label: "เขียวอมฟ้าวิเคราะห์", color: "#1F8A70" },
+  { label: "น้ำเงินพัสดุ", color: "#2563EB" },
+  { label: "น้ำตาลร่มโพธิ์", color: "#6D4C41" },
+  { label: "ม่วงสวัสดิการ", color: "#7E3B6B" },
+  { label: "ทองโบสถ์", color: "#D97706" },
+  { label: "ขาวเทาอาคารทั่วไป", color: "#E2E8F0" },
+];
 
 export interface Entrance3DProps {
   id: string;
@@ -123,6 +188,15 @@ export interface SakonHospital3DDataset {
   covered_walkway_lines?: {
     type: "FeatureCollection";
     features: GeoJSONLineFeature<{ id: string; name: string }>[];
+  };
+  trees?: {
+    type: "FeatureCollection";
+    features: GeoJSONPolygonFeature<{
+      id: string;
+      base_height: number;
+      height: number;
+      color: string;
+    }>[];
   };
   buildings: {
     type: "FeatureCollection";
@@ -271,7 +345,7 @@ function categoryColorForNode(node: MapNode): {
   return { category: "specialty", color: "#0F766E" };
 }
 
-function createSyntheticBuildingPolygon(
+export function createRectBuildingRing(
   lat: number,
   lng: number,
   widthM = 28,
@@ -284,8 +358,8 @@ function createSyntheticBuildingPolygon(
   const cosLat = Math.cos((lat * Math.PI) / 180);
   const mPerDegLat = 111320;
   const mPerDegLng = 111320 * cosLat;
-  const hw = widthM / 2;
-  const hd = depthM / 2;
+  const hw = Math.max(2, widthM) / 2;
+  const hd = Math.max(2, depthM) / 2;
   const corners = [
     [-hw, -hd],
     [hw, -hd],
@@ -303,25 +377,146 @@ function createSyntheticBuildingPolygon(
   });
 }
 
+function createSyntheticBuildingPolygon(
+  lat: number,
+  lng: number,
+  widthM = 28,
+  depthM = 20,
+  angleDeg = -24
+): number[][] {
+  return createRectBuildingRing(lat, lng, widthM, depthM, angleDeg);
+}
+
+/**
+ * Applies saved Admin 3D overrides (extrusion width/depth/angle/height/base_height/color/position)
+ * and appends admin-created custom extruded wings or buildings.
+ */
+export function apply3DOverrides(
+  dataset: SakonHospital3DDataset,
+  payload: Map3DOverridesPayload | null | undefined
+): SakonHospital3DDataset {
+  if (!payload) return dataset;
+  const overrides = payload.overrides || {};
+  const customParts = payload.custom_parts || [];
+
+  const updatedBuildings: GeoJSONPolygonFeature<Building3DProps>[] = [];
+  for (const feat of dataset.buildings.features) {
+    const ov = overrides[feat.properties.id];
+    if (!ov) {
+      updatedBuildings.push(feat);
+      continue;
+    }
+    if (ov.hidden) {
+      continue;
+    }
+    const nextLat = ov.center_lat ?? feat.properties.center_lat;
+    const nextLng = ov.center_lng ?? feat.properties.center_lng;
+    const nextW = ov.width_m ?? feat.properties.width_m ?? 28;
+    const nextD = ov.depth_m ?? feat.properties.depth_m ?? 20;
+    const nextAngle = ov.angle_deg ?? feat.properties.angle_deg ?? -24;
+
+    updatedBuildings.push({
+      ...feat,
+      properties: {
+        ...feat.properties,
+        name: ov.name || feat.properties.name,
+        short_name:
+          ov.short_name !== undefined
+            ? ov.short_name
+            : feat.properties.short_name,
+        center_lat: nextLat,
+        center_lng: nextLng,
+        width_m: nextW,
+        depth_m: nextD,
+        angle_deg: nextAngle,
+        height: ov.height ?? feat.properties.height,
+        base_height: ov.base_height ?? feat.properties.base_height ?? 0,
+        levels: Math.max(1, Math.round((ov.height ?? feat.properties.height) / 4)),
+        color: ov.color || feat.properties.color,
+        linked_node_id:
+          ov.linked_node_id !== undefined
+            ? ov.linked_node_id
+            : feat.properties.linked_node_id ?? null,
+      },
+      geometry: {
+        type: "Polygon",
+        coordinates: [
+          createRectBuildingRing(nextLat, nextLng, nextW, nextD, nextAngle),
+        ],
+      },
+    });
+  }
+
+  for (const part of customParts) {
+    updatedBuildings.push({
+      type: "Feature",
+      properties: {
+        id: part.id,
+        name: part.name || "ส่วนยื่นอาคาร 3D",
+        short_name: part.is_wing ? "" : part.short_name || part.name || "",
+        category: "support",
+        levels: Math.max(1, Math.round(part.height / 4)),
+        height: part.height,
+        base_height: part.base_height || 0,
+        priority: part.is_wing ? 3 : 2,
+        color: part.color || "#E2E8F0",
+        source: "admin-custom-3d",
+        is_wing: part.is_wing,
+        parent_id: part.parent_id || null,
+        width_m: part.width_m,
+        depth_m: part.depth_m,
+        angle_deg: part.angle_deg,
+        center_lat: part.center_lat,
+        center_lng: part.center_lng,
+        linked_node_id: part.linked_node_id ?? null,
+      },
+      geometry: {
+        type: "Polygon",
+        coordinates: [
+          createRectBuildingRing(
+            part.center_lat,
+            part.center_lng,
+            part.width_m,
+            part.depth_m,
+            part.angle_deg
+          ),
+        ],
+      },
+    });
+  }
+
+  return {
+    ...dataset,
+    buildings: {
+      type: "FeatureCollection",
+      features: updatedBuildings,
+    },
+  };
+}
+
 export interface BoundBuildingResult {
   features: GeoJSONPolygonFeature<Building3DProps>[];
   labelFeatures: GeoJSONPointFeature<BuildingLabelProps>[];
   nodeByFeatureId: Map<string, MapNode>;
   featureIdByNodeId: Map<number, string>;
   hasRouteThroughAnyBuilding: boolean;
+  userInsideBuildingName: string | null;
 }
 
 /**
  * Spatially binds live PostgreSQL `map_nodes` (is_building = true) to the 3D Sakon Nakhon Hospital
  * footprints, computes zoom-prioritized label points for MapLibre Symbol Layers, and flags buildings
- * whose ground floor is crossed by the active walking route (`route_through: true` -> opacity 0.35).
+ * as translucent (`route_through: true`) when crossed by the active route OR when the user's current
+ * GPS position is inside that building (including all linked wings/roof tiers).
  */
 export function bindMapNodesTo3DBuildings(
   dataset: SakonHospital3DDataset,
   dbBuildings: MapNode[],
   targetNodeId: number | null,
   routePath: [number, number][] | null = null,
-  forceTranslucent = false
+  forceTranslucent = false,
+  selectedBuildingId: string | null = null,
+  userCoords: [number, number] | null = null
 ): BoundBuildingResult {
   const clonedFeatures: GeoJSONPolygonFeature<Building3DProps>[] =
     dataset.buildings.features.map((f, idx) => ({
@@ -330,8 +525,9 @@ export function bindMapNodesTo3DBuildings(
       properties: {
         ...f.properties,
         priority: f.properties.priority ?? 2,
-        linked_node_id: null,
+        linked_node_id: f.properties.linked_node_id ?? null,
         is_target: false,
+        is_selected: selectedBuildingId === f.properties.id,
         route_through: false,
       },
     }));
@@ -339,13 +535,35 @@ export function bindMapNodesTo3DBuildings(
   const nodeByFeatureId = new Map<string, MapNode>();
   const featureIdByNodeId = new Map<number, string>();
   const claimedFeatureIds = new Set<string>();
+  const dbNodeById = new Map<number, MapNode>();
+  for (const node of dbBuildings) {
+    dbNodeById.set(node.id, node);
+  }
+
+  // 0. Honor explicit admin-assigned linked_node_id first (supports multi-block buildings & wings!)
+  for (const f of clonedFeatures) {
+    const explicitId = f.properties.linked_node_id;
+    if (explicitId && dbNodeById.has(explicitId)) {
+      const node = dbNodeById.get(explicitId)!;
+      nodeByFeatureId.set(f.properties.id, node);
+      if (!featureIdByNodeId.has(node.id)) {
+        featureIdByNodeId.set(node.id, f.properties.id);
+      }
+      f.properties.is_target = targetNodeId === node.id;
+      claimedFeatureIds.add(f.properties.id);
+    }
+  }
 
   for (const node of dbBuildings) {
+    // Skip nodes already explicitly linked to one or more admin-customized 3D blocks
+    if (featureIdByNodeId.has(node.id)) {
+      continue;
+    }
     let matched: GeoJSONPolygonFeature<Building3DProps> | null = null;
 
-    // 1. Exact Point-in-Polygon containment check
+    // 1. Exact Point-in-Polygon containment check (skip architectural wings)
     for (const f of clonedFeatures) {
-      if (claimedFeatureIds.has(f.properties.id)) continue;
+      if (f.properties.is_wing || claimedFeatureIds.has(f.properties.id)) continue;
       const ring = f.geometry.coordinates[0];
       if (ring && pointInRing(node.lng, node.lat, ring)) {
         matched = f;
@@ -353,11 +571,11 @@ export function bindMapNodesTo3DBuildings(
       }
     }
 
-    // 2. Fallback: nearest unclaimed building footprint within 32 meters
+    // 2. Fallback: nearest unclaimed main building footprint within 32 meters
     if (!matched) {
       let bestDist = 32;
       for (const f of clonedFeatures) {
-        if (claimedFeatureIds.has(f.properties.id)) continue;
+        if (f.properties.is_wing || claimedFeatureIds.has(f.properties.id)) continue;
         const d = calculateDistanceMeters(
           node.lat,
           node.lng,
@@ -376,17 +594,14 @@ export function bindMapNodesTo3DBuildings(
     if (matched) {
       claimedFeatureIds.add(matched.properties.id);
       matched.properties.name = node.name || matched.properties.name;
-      // Preserve curated official wall-map short_name so extra DB suffixes (e.g. "(10 ชั้น)", "(8 ชั้น)")
-      // never clutter the 3D map labels; only fall back to node.name if short_name is empty.
+      // Preserve curated official wall-map short_name & authentic wall-map color
       if (!matched.properties.short_name && node.name) {
         matched.properties.short_name = node.name;
       }
       matched.properties.category = category;
-      matched.properties.color = color;
-      matched.properties.height = inferHeightFromNodeName(
-        node.name || "",
-        matched.properties.height
-      );
+      if (!matched.properties.color) {
+        matched.properties.color = color;
+      }
       matched.properties.keywords = node.keywords || matched.properties.keywords;
       matched.properties.indoor_guide =
         node.indoor_guide || matched.properties.indoor_guide;
@@ -414,10 +629,14 @@ export function bindMapNodesTo3DBuildings(
           indoor_guide: node.indoor_guide,
           color,
           source: "database",
+          width_m: 28,
+          depth_m: 20,
+          angle_deg: -24,
           center_lng: node.lng,
           center_lat: node.lat,
           linked_node_id: node.id,
           is_target: targetNodeId === node.id,
+          is_selected: selectedBuildingId === synthId,
           route_through: false,
         },
         geometry: {
@@ -431,45 +650,95 @@ export function bindMapNodesTo3DBuildings(
     }
   }
 
-  // Flag buildings crossed by the active route (or when user toggles translucent view)
+  // Flag buildings crossed by the active route, user walking inside, or X-Ray mode ON
   let hasRouteThroughAnyBuilding = false;
+  let userInsideBuildingName: string | null = null;
+  const userInsideGroupIds = new Set<string>();
+  const userInsideLinkedNodeIds = new Set<number>();
+
+  // Pass 1: detect which building/wing the user's current position is inside
+  if (userCoords) {
+    const [userLat, userLng] = userCoords;
+    for (const f of clonedFeatures) {
+      const ring = f.geometry.coordinates[0];
+      if (ring && ring.length >= 4 && pointInRing(userLng, userLat, ring)) {
+        f.properties.user_inside = true;
+        userInsideGroupIds.add(f.properties.id);
+        if (f.properties.parent_id) {
+          userInsideGroupIds.add(f.properties.parent_id);
+        }
+        if (f.properties.linked_node_id) {
+          userInsideLinkedNodeIds.add(f.properties.linked_node_id);
+        }
+        if (!userInsideBuildingName && f.properties.short_name) {
+          userInsideBuildingName = f.properties.short_name;
+        }
+      }
+    }
+  }
+
+  // Pass 2: propagate translucency to the entire multi-part building (main block + all wings/roof tiers)
   for (const f of clonedFeatures) {
     const ring = f.geometry.coordinates[0];
-    const crossed =
-      forceTranslucent ||
-      (routePath && routePath.length >= 2 && routePassesThroughRing(routePath, ring));
-    if (crossed) {
+    const inUserGroup =
+      Boolean(f.properties.user_inside) ||
+      userInsideGroupIds.has(f.properties.id) ||
+      Boolean(
+        f.properties.parent_id && userInsideGroupIds.has(f.properties.parent_id)
+      ) ||
+      Boolean(
+        f.properties.linked_node_id &&
+          userInsideLinkedNodeIds.has(f.properties.linked_node_id)
+      );
+
+    if (inUserGroup) {
+      f.properties.user_inside = true;
+      if (!userInsideBuildingName && f.properties.short_name) {
+        userInsideBuildingName = f.properties.short_name;
+      }
+    }
+
+    const routeCrossed =
+      Boolean(
+        routePath &&
+          routePath.length >= 2 &&
+          routePassesThroughRing(routePath, ring)
+      );
+
+    if (forceTranslucent || inUserGroup || routeCrossed) {
       f.properties.route_through = true;
-      if (routePath && routePath.length >= 2) {
+      if (routeCrossed) {
         hasRouteThroughAnyBuilding = true;
       }
     }
   }
 
-  // Generate GeoJSON point labels for MapLibre Symbol Layers (collision-avoided, zoom-tiered)
+  // Generate GeoJSON point labels for MapLibre Symbol Layers (skip architectural wings & empty labels)
   const labelFeatures: GeoJSONPointFeature<BuildingLabelProps>[] =
-    clonedFeatures.map((f) => {
-      const p = f.properties;
-      const isTarget = Boolean(p.is_target);
-      return {
-        type: "Feature",
-        properties: {
-          id: p.id,
-          name: p.name,
-          short_name: p.short_name,
-          category: p.category,
-          priority: isTarget ? 1 : p.priority,
-          height: p.height,
-          is_target: isTarget,
-          linked_node_id: p.linked_node_id ?? null,
-          sort_key: isTarget ? 0 : p.priority === 1 ? 10 : p.linked_node_id ? 20 : 30,
-        },
-        geometry: {
-          type: "Point",
-          coordinates: [p.center_lng, p.center_lat],
-        },
-      };
-    });
+    clonedFeatures
+      .filter((f) => !f.properties.is_wing && Boolean(f.properties.short_name))
+      .map((f) => {
+        const p = f.properties;
+        const isTarget = Boolean(p.is_target);
+        return {
+          type: "Feature",
+          properties: {
+            id: p.id,
+            name: p.name,
+            short_name: p.short_name,
+            category: p.category,
+            priority: isTarget ? 1 : p.priority,
+            height: p.height,
+            is_target: isTarget,
+            linked_node_id: p.linked_node_id ?? null,
+            sort_key: isTarget ? 0 : p.priority === 1 ? 10 : p.linked_node_id ? 20 : 30,
+          },
+          geometry: {
+            type: "Point",
+            coordinates: [p.center_lng, p.center_lat],
+          },
+        };
+      });
 
   return {
     features: clonedFeatures,
@@ -477,5 +746,6 @@ export function bindMapNodesTo3DBuildings(
     nodeByFeatureId,
     featureIdByNodeId,
     hasRouteThroughAnyBuilding,
+    userInsideBuildingName,
   };
 }

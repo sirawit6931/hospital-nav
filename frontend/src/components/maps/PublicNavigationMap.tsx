@@ -1,9 +1,10 @@
 "use client";
 
 import "leaflet/dist/leaflet.css";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import L from "leaflet";
 import {
+  Circle,
   MapContainer,
   Marker,
   Pane,
@@ -18,9 +19,11 @@ import {
 import {
   Box,
   Compass,
-  Crosshair,
   Globe,
+  Info,
+  Layers,
   Loader2,
+  LocateFixed,
   Map as MapIcon,
   Navigation,
   Pause,
@@ -40,6 +43,8 @@ import {
   classifyBuilding,
 } from "@/lib/hospital";
 import type { MapViewMode, SakonHospital3DDataset } from "@/lib/hospital3d";
+import type { ActiveNavigationProgress } from "@/lib/navigation";
+import ActiveNavigationOverlay from "@/components/ActiveNavigationOverlay";
 
 // Tight pan/zoom bounds closely fitted around Sakon Nakhon Hospital (way/494975554: lat 17.1610..17.1652, lng 104.1556..104.1603)
 const HOSPITAL_CAMPUS_CENTER: [number, number] = [17.1633, 104.1581];
@@ -65,17 +70,33 @@ interface PublicNavigationMapProps {
   displayOriginCoords: [number, number];
   rawOriginCoords: [number, number];
   userHeadingDeg: number;
+  gpsStatus: "idle" | "locating" | "ready" | "fallback";
+  gpsAccuracyMeters: number | null;
+  followUser: boolean;
+  headingUpMode?: boolean;
+  locateTrigger: number;
   isSnappedToPath: boolean;
   isAutoRerouting: boolean;
   distanceToTargetMeters: number | null;
   focusedNode: MapNode | null;
   targetBuilding: MapNode | null;
   routeData: RouteResponse | null;
+  isNavigating: boolean;
+  navProgress: ActiveNavigationProgress | null;
+  voiceEnabled: boolean;
+  isSimulatingWalk: boolean;
+  recenterTrigger: number;
   mockGpsEnabled: boolean;
   isMockWalking: boolean;
   mockWalkProgress: number;
   onSelectBuilding: (building: MapNode) => void;
   onLocateMe: () => void;
+  onChangeFollowUser: (follow: boolean) => void;
+  onToggleHeadingUp?: () => void;
+  onToggleVoice: () => void;
+  onToggleSimulateWalk: () => void;
+  onEndNavigation: () => void;
+  onRecenterNavigation: () => void;
   onToggleMockGps: () => void;
   onMockMapClick: (lat: number, lng: number) => void;
   onToggleMockWalk: () => void;
@@ -124,15 +145,33 @@ function createRawGpsGhostIcon() {
 function MapViewportController({
   routePath,
   focusedNode,
+  displayOriginCoords,
+  followUser,
+  locateTrigger,
+  isNavigating,
+  recenterTrigger,
   mockGpsEnabled,
   resetTrigger,
+  onChangeFollowUser,
 }: {
   routePath: [number, number][] | null;
   focusedNode: MapNode | null;
+  displayOriginCoords: [number, number];
+  followUser: boolean;
+  locateTrigger: number;
+  isNavigating: boolean;
+  recenterTrigger: number;
   mockGpsEnabled: boolean;
   resetTrigger: number;
+  onChangeFollowUser: (follow: boolean) => void;
 }) {
   const map = useMap();
+
+  useMapEvents({
+    dragstart() {
+      onChangeFollowUser(false);
+    },
+  });
 
   useEffect(() => {
     if (resetTrigger > 0) {
@@ -143,7 +182,32 @@ function MapViewportController({
   }, [map, resetTrigger]);
 
   useEffect(() => {
-    if (mockGpsEnabled) return;
+    if (locateTrigger > 0) {
+      map.flyTo(displayOriginCoords, Math.max(map.getZoom(), 18.25), {
+        duration: 0.6,
+      });
+    }
+    // Fly explicitly when locate button is pressed
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [map, locateTrigger]);
+
+  useEffect(() => {
+    if (isNavigating || recenterTrigger > 0) {
+      if (isNavigating) {
+        map.flyTo(displayOriginCoords, 19, { duration: 0.55 });
+      }
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [map, isNavigating, recenterTrigger]);
+
+  useEffect(() => {
+    if (followUser) {
+      map.panTo(displayOriginCoords, { animate: true, duration: 0.35 });
+    }
+  }, [map, displayOriginCoords, followUser]);
+
+  useEffect(() => {
+    if (mockGpsEnabled || isNavigating) return;
     if (routePath && routePath.length >= 2) {
       const bounds = L.latLngBounds(routePath);
       map.fitBounds(bounds, { padding: [56, 56], maxZoom: 19, animate: true });
@@ -152,7 +216,7 @@ function MapViewportController({
     if (routePath && routePath.length === 1) {
       map.flyTo(routePath[0], 18, { duration: 0.6 });
     }
-  }, [map, routePath, mockGpsEnabled]);
+  }, [map, routePath, mockGpsEnabled, isNavigating]);
 
   useEffect(() => {
     if (focusedNode) {
@@ -194,17 +258,33 @@ export default function PublicNavigationMap({
   displayOriginCoords,
   rawOriginCoords,
   userHeadingDeg,
+  gpsStatus,
+  gpsAccuracyMeters,
+  followUser,
+  headingUpMode,
+  locateTrigger,
   isSnappedToPath,
   isAutoRerouting,
   distanceToTargetMeters,
   focusedNode,
   targetBuilding,
   routeData,
+  isNavigating,
+  navProgress,
+  voiceEnabled,
+  isSimulatingWalk,
+  recenterTrigger,
   mockGpsEnabled,
   isMockWalking,
   mockWalkProgress,
   onSelectBuilding,
   onLocateMe,
+  onChangeFollowUser,
+  onToggleHeadingUp,
+  onToggleVoice,
+  onToggleSimulateWalk,
+  onEndNavigation,
+  onRecenterNavigation,
   onToggleMockGps,
   onMockMapClick,
   onToggleMockWalk,
@@ -214,6 +294,35 @@ export default function PublicNavigationMap({
   const [campusDataset, setCampusDataset] =
     useState<SakonHospital3DDataset | null>(cachedCampusDataset);
   const [resetTrigger, setResetTrigger] = useState(0);
+  const [controlsOpen, setControlsOpen] = useState(false);
+  const [legendOpen, setLegendOpen] = useState(false);
+
+  const controlsPopoverRef = useRef<HTMLDivElement | null>(null);
+  const legendPopoverRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    const handleOutsideClick = (e: MouseEvent | TouchEvent) => {
+      const target = e.target as Node;
+      if (
+        controlsPopoverRef.current &&
+        !controlsPopoverRef.current.contains(target)
+      ) {
+        setControlsOpen(false);
+      }
+      if (
+        legendPopoverRef.current &&
+        !legendPopoverRef.current.contains(target)
+      ) {
+        setLegendOpen(false);
+      }
+    };
+    document.addEventListener("mousedown", handleOutsideClick);
+    document.addEventListener("touchstart", handleOutsideClick);
+    return () => {
+      document.removeEventListener("mousedown", handleOutsideClick);
+      document.removeEventListener("touchstart", handleOutsideClick);
+    };
+  }, []);
 
   useEffect(() => {
     if (cachedCampusDataset) {
@@ -301,8 +410,14 @@ export default function PublicNavigationMap({
         <MapViewportController
           routePath={routePath}
           focusedNode={focusedNode}
+          displayOriginCoords={displayOriginCoords}
+          followUser={followUser}
+          locateTrigger={locateTrigger}
+          isNavigating={isNavigating}
+          recenterTrigger={recenterTrigger}
           mockGpsEnabled={mockGpsEnabled}
           resetTrigger={resetTrigger}
+          onChangeFollowUser={onChangeFollowUser}
         />
 
         <MockClickCapture
@@ -361,30 +476,90 @@ export default function PublicNavigationMap({
             />
           ))}
 
-          {/* Active Walking Route Polyline (Bright Sky Blue with crisp white casing) */}
-          {routePath && routePath.length >= 2 && (
+          {/* Live GPS Accuracy Circle */}
+          {!mockGpsEnabled &&
+            gpsStatus === "ready" &&
+            gpsAccuracyMeters !== null && (
+              <Circle
+                center={displayOriginCoords}
+                radius={Math.max(3, Math.min(45, gpsAccuracyMeters))}
+                interactive={false}
+                pathOptions={{
+                  color: "#0F766E",
+                  weight: 1.5,
+                  opacity: 0.45,
+                  fillColor: "#14B8A6",
+                  fillOpacity: 0.14,
+                }}
+              />
+            )}
+
+          {/* Active Walking Route Polyline (splits into faded gray passed + bright sky-blue remaining during Active Nav) */}
+          {isNavigating && navProgress ? (
             <>
-              <Polyline
-                positions={routePath}
-                pathOptions={{
-                  color: "#FFFFFF",
-                  weight: 10,
-                  opacity: 0.94,
-                  lineCap: "round",
-                  lineJoin: "round",
-                }}
-              />
-              <Polyline
-                positions={routePath}
-                pathOptions={{
-                  color: "#0EA5E9",
-                  weight: 6,
-                  opacity: 1,
-                  lineCap: "round",
-                  lineJoin: "round",
-                }}
-              />
+              {navProgress.passedPath.length >= 2 && (
+                <Polyline
+                  positions={navProgress.passedPath}
+                  pathOptions={{
+                    color: "#94A3B8",
+                    weight: 6,
+                    opacity: 0.85,
+                    lineCap: "round",
+                    lineJoin: "round",
+                  }}
+                />
+              )}
+              {navProgress.remainingPath.length >= 2 && (
+                <>
+                  <Polyline
+                    positions={navProgress.remainingPath}
+                    pathOptions={{
+                      color: "#FFFFFF",
+                      weight: 10,
+                      opacity: 0.94,
+                      lineCap: "round",
+                      lineJoin: "round",
+                    }}
+                  />
+                  <Polyline
+                    positions={navProgress.remainingPath}
+                    pathOptions={{
+                      color: "#0EA5E9",
+                      weight: 6,
+                      opacity: 1,
+                      lineCap: "round",
+                      lineJoin: "round",
+                    }}
+                  />
+                </>
+              )}
             </>
+          ) : (
+            routePath &&
+            routePath.length >= 2 && (
+              <>
+                <Polyline
+                  positions={routePath}
+                  pathOptions={{
+                    color: "#FFFFFF",
+                    weight: 10,
+                    opacity: 0.94,
+                    lineCap: "round",
+                    lineJoin: "round",
+                  }}
+                />
+                <Polyline
+                  positions={routePath}
+                  pathOptions={{
+                    color: "#0EA5E9",
+                    weight: 6,
+                    opacity: 1,
+                    lineCap: "round",
+                    lineJoin: "round",
+                  }}
+                />
+              </>
+            )
           )}
 
           {/* In Mock Mode: Show dashed tether between raw tap and snapped position when Snap-to-Path is active */}
@@ -499,26 +674,45 @@ export default function PublicNavigationMap({
         })}
       </MapContainer>
 
-      {/* Top-Center Live Status Pill (Auto-Reroute / Snap-to-Path / Remaining Distance) */}
-      {(isAutoRerouting || (targetBuilding && distanceToTargetMeters !== null)) && (
-        <div className="absolute top-3 left-14 right-32 md:right-36 z-[400] flex justify-center pointer-events-none">
+      {/* Google-Maps-Style Active Turn-by-Turn Navigation HUD */}
+      {isNavigating && navProgress && targetBuilding && (
+        <ActiveNavigationOverlay
+          targetName={routeData?.target_building?.name || targetBuilding.name}
+          navProgress={navProgress}
+          isAutoRerouting={isAutoRerouting}
+          followUser={followUser}
+          voiceEnabled={voiceEnabled}
+          isSimulatingWalk={isSimulatingWalk}
+          onRecenter={onRecenterNavigation}
+          onToggleVoice={onToggleVoice}
+          onToggleSimulateWalk={onToggleSimulateWalk}
+          onEndNavigation={onEndNavigation}
+        />
+      )}
+
+      {/* Top-Center Compact 1-Line Navigation Status Pill (hidden during Active Navigation) */}
+      {!isNavigating &&
+        (isAutoRerouting ||
+          (targetBuilding && routeData && distanceToTargetMeters !== null)) && (
+        <div className="absolute top-3 left-14 right-16 z-[400] flex justify-start sm:justify-center pointer-events-none">
           {isAutoRerouting ? (
-            <div className="pointer-events-auto rounded-full bg-[#0F172A]/90 text-white px-3.5 py-1.5 shadow-md text-xs font-semibold flex items-center gap-2">
-              <Loader2 className="w-3.5 h-3.5 animate-spin text-sky-400" />
-              <span>ออกนอกเส้นทาง กำลังคำนวณเส้นทางใหม่...</span>
+            <div className="pointer-events-auto rounded-full bg-[#0F172A]/90 text-white px-3 py-1.5 shadow-sm text-xs font-semibold flex items-center gap-1.5 whitespace-nowrap">
+              <Loader2 className="w-3.5 h-3.5 animate-spin text-sky-400 shrink-0" />
+              <span>กำลังคำนวณเส้นทางใหม่...</span>
             </div>
           ) : (
-            <div className="pointer-events-auto rounded-full bg-white/95 backdrop-blur border border-slate-200 px-3.5 py-1.5 shadow-md text-xs font-semibold text-[#0F172A] flex items-center gap-2">
+            <div className="pointer-events-auto rounded-full bg-white/95 backdrop-blur border border-slate-200 px-3 py-1.5 shadow-sm text-xs font-semibold text-[#0F172A] flex items-center gap-1.5 whitespace-nowrap max-w-full truncate">
               <span
-                className={`w-2 h-2 rounded-full ${
+                className={`w-2 h-2 rounded-full shrink-0 ${
                   isSnappedToPath ? "bg-[#047857]" : "bg-[#0EA5E9]"
                 }`}
               />
               <span>
-                ห่างปลายทาง {Math.max(0, Math.round(distanceToTargetMeters ?? 0))} ม.
+                ห่างปลายทาง{" "}
+                {Math.max(0, Math.round(distanceToTargetMeters ?? 0))} ม.
               </span>
               {isSnappedToPath && (
-                <span className="hidden sm:inline text-[#047857] border-l border-slate-200 pl-2">
+                <span className="hidden sm:inline text-[#047857] border-l border-slate-200 pl-1.5">
                   เกาะเส้นทางแล้ว
                 </span>
               )}
@@ -527,85 +721,164 @@ export default function PublicNavigationMap({
         </div>
       )}
 
-      {/* Top-right Map Controls: 3-Mode Map Switcher + Locate Me + Mock GPS Toggle */}
-      <div className="absolute top-3 right-3 z-[400] flex flex-col items-end gap-2">
-        <div
-          role="group"
-          aria-label="เลือกโหมดแผนที่"
-          className="inline-flex items-center p-1 rounded-xl bg-white/95 backdrop-blur border border-slate-200 shadow-md"
-        >
+      {/* Top-Right Collapsible Map Controls (shifts below Top Turn Banner during Active Navigation) */}
+      <div
+        ref={controlsPopoverRef}
+        className={`absolute right-3 z-[410] flex flex-col items-end gap-2 ${
+          isNavigating ? "top-36 sm:top-32" : "top-3"
+        }`}
+      >
+        {/* 1) Layers & Display Settings Popover Trigger */}
+        <div className="relative">
           <button
             type="button"
-            onClick={() => onChangeMapViewMode("3d")}
-            className={`min-h-[38px] px-2.5 sm:px-3 rounded-lg text-xs font-bold flex items-center gap-1.5 transition-colors cursor-pointer ${
-              mapViewMode === "3d"
-                ? "bg-[#0F766E] text-white shadow-xs"
-                : "text-slate-600 hover:bg-slate-100"
+            onClick={() => setControlsOpen((prev) => !prev)}
+            title="ชั้นข้อมูลและการแสดงผล"
+            aria-label="ชั้นข้อมูลและการแสดงผล"
+            aria-expanded={controlsOpen}
+            className={`w-10 h-10 rounded-xl border shadow-sm flex items-center justify-center transition-colors cursor-pointer ${
+              controlsOpen || mockGpsEnabled
+                ? "bg-[#0F766E] border-[#0F766E] text-white"
+                : "bg-white/95 backdrop-blur border-slate-200 text-slate-700 hover:bg-slate-50"
             }`}
           >
-            <Box className="w-3.5 h-3.5" />
-            <span>แผนที่ 3D</span>
+            <Layers className="w-4 h-4" />
           </button>
-          <button
-            type="button"
-            onClick={() => onChangeMapViewMode("satellite")}
-            className={`min-h-[38px] px-2.5 sm:px-3 rounded-lg text-xs font-bold flex items-center gap-1.5 transition-colors cursor-pointer ${
-              mapViewMode === "satellite"
-                ? "bg-[#0F766E] text-white shadow-xs"
-                : "text-slate-600 hover:bg-slate-100"
-            }`}
-          >
-            <Globe className="w-3.5 h-3.5" />
-            <span>ดาวเทียม</span>
-          </button>
-          <button
-            type="button"
-            onClick={() => onChangeMapViewMode("street")}
-            className={`min-h-[38px] px-2.5 sm:px-3 rounded-lg text-xs font-bold flex items-center gap-1.5 transition-colors cursor-pointer ${
-              mapViewMode === "street"
-                ? "bg-[#0F766E] text-white shadow-xs"
-                : "text-slate-600 hover:bg-slate-100"
-            }`}
-          >
-            <MapIcon className="w-3.5 h-3.5" />
-            <span className="hidden sm:inline">แผนที่ถนน</span>
-            <span className="sm:hidden">ถนน</span>
-          </button>
+
+          {controlsOpen && (
+            <div className="absolute top-0 right-12 w-64 rounded-2xl bg-white/98 backdrop-blur border border-slate-200 shadow-lg p-3 space-y-3">
+              <div className="flex items-center justify-between">
+                <span className="text-xs font-bold text-[#0F172A]">
+                  ชั้นข้อมูลและการแสดงผล
+                </span>
+                <button
+                  type="button"
+                  onClick={() => setControlsOpen(false)}
+                  aria-label="ปิดแผงควบคุม"
+                  className="w-6 h-6 rounded-lg hover:bg-slate-100 text-slate-400 flex items-center justify-center cursor-pointer"
+                >
+                  <X className="w-3.5 h-3.5" />
+                </button>
+              </div>
+
+              {/* Map Mode Switcher */}
+              <div className="grid grid-cols-3 gap-1 p-1 rounded-xl bg-slate-100">
+                <button
+                  type="button"
+                  onClick={() => {
+                    onChangeMapViewMode("3d");
+                    setControlsOpen(false);
+                  }}
+                  className={`min-h-[34px] rounded-lg text-[11px] font-bold flex items-center justify-center gap-1 transition-colors cursor-pointer ${
+                    mapViewMode === "3d"
+                      ? "bg-[#0F766E] text-white shadow-xs"
+                      : "text-slate-600 hover:bg-white"
+                  }`}
+                >
+                  <Box className="w-3.5 h-3.5" />
+                  <span>3D</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    onChangeMapViewMode("satellite");
+                    setControlsOpen(false);
+                  }}
+                  className={`min-h-[34px] rounded-lg text-[11px] font-bold flex items-center justify-center gap-1 transition-colors cursor-pointer ${
+                    mapViewMode === "satellite"
+                      ? "bg-[#0F766E] text-white shadow-xs"
+                      : "text-slate-600 hover:bg-white"
+                  }`}
+                >
+                  <Globe className="w-3.5 h-3.5" />
+                  <span>ดาวเทียม</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    onChangeMapViewMode("street");
+                    setControlsOpen(false);
+                  }}
+                  className={`min-h-[34px] rounded-lg text-[11px] font-bold flex items-center justify-center gap-1 transition-colors cursor-pointer ${
+                    mapViewMode === "street"
+                      ? "bg-[#0F766E] text-white shadow-xs"
+                      : "text-slate-600 hover:bg-white"
+                  }`}
+                >
+                  <MapIcon className="w-3.5 h-3.5" />
+                  <span>ถนน</span>
+                </button>
+              </div>
+
+              {/* Quick Actions */}
+              <div className="grid grid-cols-2 gap-1.5">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setResetTrigger((n) => n + 1);
+                    setControlsOpen(false);
+                  }}
+                  className="min-h-[36px] px-2.5 rounded-xl border border-slate-200 bg-white hover:bg-slate-50 text-xs font-semibold text-slate-700 flex items-center justify-center gap-1.5 cursor-pointer"
+                >
+                  <RotateCcw className="w-3.5 h-3.5" />
+                  <span>รีเซ็ตมุมกล้อง</span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => {
+                    onToggleMockGps();
+                    setControlsOpen(false);
+                  }}
+                  className={`min-h-[36px] px-2.5 rounded-xl border text-xs font-semibold flex items-center justify-center gap-1.5 transition-colors cursor-pointer ${
+                    mockGpsEnabled
+                      ? "bg-amber-500 border-amber-600 text-white"
+                      : "bg-white border-slate-200 text-slate-700 hover:bg-amber-50"
+                  }`}
+                >
+                  <Navigation className="w-3.5 h-3.5" />
+                  <span>{mockGpsEnabled ? "ปิดจำลอง" : "จำลอง GPS"}</span>
+                </button>
+              </div>
+            </div>
+          )}
         </div>
 
-        <div className="flex items-center gap-1.5">
-          <button
-            type="button"
-            onClick={onLocateMe}
-            title="ตำแหน่งของฉัน"
-            className="min-h-[42px] px-3.5 rounded-xl bg-white/95 backdrop-blur border border-slate-200 shadow-md hover:bg-teal-50 text-xs font-bold text-[#0F766E] flex items-center gap-2 cursor-pointer"
-          >
-            <Crosshair className="w-4 h-4" />
-            <span>ตำแหน่งฉัน</span>
-          </button>
-
-          <button
-            type="button"
-            onClick={() => setResetTrigger((n) => n + 1)}
-            title="รีเซ็ตมุมกล้องศูนย์กลาง รพ.สกลนคร"
-            className="min-h-[42px] min-w-[42px] rounded-xl bg-white/95 backdrop-blur border border-slate-200 shadow-md hover:bg-slate-50 text-slate-700 flex items-center justify-center cursor-pointer"
-          >
-            <RotateCcw className="w-4 h-4" />
-          </button>
-        </div>
-
+        {/* 2) Locate Me (40x40px) */}
         <button
           type="button"
-          onClick={onToggleMockGps}
-          title="เปิด/ปิดโหมดจำลองพิกัด GPS สำหรับทดสอบ"
-          className={`min-h-[42px] px-3.5 rounded-xl border shadow-md text-xs font-bold flex items-center gap-2 transition-colors cursor-pointer ${
-            mockGpsEnabled
-              ? "bg-amber-500 border-amber-600 text-white hover:bg-amber-600"
-              : "bg-white/95 backdrop-blur border-slate-200 text-slate-700 hover:bg-amber-50 hover:border-amber-300"
+          onClick={onLocateMe}
+          title={
+            followUser && gpsAccuracyMeters !== null && gpsStatus === "ready"
+              ? `ตำแหน่งฉัน (กำลังติดตาม GPS ±${gpsAccuracyMeters} ม.)`
+              : "ตำแหน่งฉัน"
+          }
+          aria-label="ตำแหน่งฉัน"
+          className={`w-10 h-10 rounded-xl border shadow-sm flex items-center justify-center transition-colors cursor-pointer ${
+            followUser
+              ? "bg-[#0F766E] border-[#0F766E] text-white"
+              : "bg-white/95 backdrop-blur border-slate-200 text-[#0F766E] hover:bg-teal-50"
+          }`}
+        >
+          <LocateFixed className="w-4 h-4" />
+        </button>
+
+        {/* 3) Heading-Up Mode (switches to 3D heading-up when toggled) */}
+        <button
+          type="button"
+          onClick={() => {
+            onToggleHeadingUp?.();
+            onChangeMapViewMode("3d");
+          }}
+          title="หมุนแผนที่ตามทิศ (โหมด 3D)"
+          aria-label="หมุนตามทิศ"
+          className={`w-10 h-10 rounded-xl border shadow-sm flex items-center justify-center transition-colors cursor-pointer ${
+            headingUpMode && followUser
+              ? "bg-[#0F766E] border-[#0F766E] text-white"
+              : "bg-white/95 backdrop-blur border-slate-200 text-slate-700 hover:bg-slate-50"
           }`}
         >
           <Compass className="w-4 h-4" />
-          <span>{mockGpsEnabled ? "ปิดจำลอง GPS" : "จำลอง GPS"}</span>
         </button>
       </div>
 
@@ -683,41 +956,70 @@ export default function PublicNavigationMap({
         </div>
       )}
 
-      {/* Bottom Legend Bar (Desktop) */}
-      <div className="hidden md:flex absolute bottom-4 left-4 right-4 z-[400] pointer-events-none justify-between items-center">
-        <div className="pointer-events-auto rounded-xl bg-white/95 backdrop-blur border border-slate-200 shadow-md px-3.5 py-2 flex items-center gap-4 text-xs font-semibold text-slate-700">
-          <span className="flex items-center gap-1.5">
-            <span
-              className={`w-3 h-3 rounded-full inline-block ${
-                mockGpsEnabled ? "bg-amber-500" : "bg-[#0F766E]"
-              }`}
-            />
-            {mockGpsEnabled ? "พิกัดจำลอง" : "จุดเริ่มต้น"}
-          </span>
-          <span className="flex items-center gap-1.5">
-            <span className="w-3 h-3 rounded-full bg-[#BE123C] inline-block" />
-            ปลายทาง
-          </span>
-          <span className="flex items-center gap-1.5">
-            <span className="w-4 border-t-2 border-dashed border-[#0F766E] inline-block" />
-            ขอบเขต รพ.สกลนคร
-          </span>
-          <span className="flex items-center gap-1.5">
-            <span className="w-4 border-t-2 border-dashed border-[#FB923C] inline-block" />
-            ทางเชื่อมมีหลังคา
-          </span>
-          <span className="flex items-center gap-1.5">
-            <span className="w-4 h-1.5 rounded-full bg-[#0EA5E9] inline-block" />
-            เส้นทางเดิน
-          </span>
-        </div>
+      {/* Bottom-Left Collapsible Legend Button ("คำอธิบายสี") — hidden during Active Navigation */}
+      {!isNavigating && (
+      <div
+        ref={legendPopoverRef}
+        className="absolute bottom-32 md:bottom-4 left-3 md:left-4 z-[400]"
+      >
+        {legendOpen && (
+          <div className="mb-2 w-60 rounded-2xl bg-white/98 backdrop-blur border border-slate-200 shadow-lg p-3 space-y-2 text-xs font-semibold text-slate-700">
+            <div className="flex items-center justify-between pb-1 border-b border-slate-100">
+              <span className="text-[#0F172A] font-bold">คำอธิบายสีแผนที่</span>
+              <button
+                type="button"
+                onClick={() => setLegendOpen(false)}
+                aria-label="ปิดคำอธิบายสี"
+                className="w-6 h-6 rounded-lg hover:bg-slate-100 text-slate-400 flex items-center justify-center cursor-pointer"
+              >
+                <X className="w-3.5 h-3.5" />
+              </button>
+            </div>
+            <div className="grid grid-cols-1 gap-1.5">
+              <span className="flex items-center gap-2">
+                <span
+                  className={`w-3 h-3 rounded-full inline-block shrink-0 ${
+                    mockGpsEnabled ? "bg-amber-500" : "bg-[#0F766E]"
+                  }`}
+                />
+                {mockGpsEnabled ? "พิกัดจำลอง" : "จุดเริ่มต้น"}
+              </span>
+              <span className="flex items-center gap-2">
+                <span className="w-3 h-3 rounded-full bg-[#BE123C] inline-block shrink-0" />
+                ปลายทาง
+              </span>
+              <span className="flex items-center gap-2">
+                <span className="w-4 border-t-2 border-dashed border-[#0F766E] inline-block shrink-0" />
+                ขอบเขต รพ.สกลนคร
+              </span>
+              <span className="flex items-center gap-2">
+                <span className="w-4 border-t-2 border-dashed border-[#FB923C] inline-block shrink-0" />
+                ทางเชื่อมมีหลังคา
+              </span>
+              <span className="flex items-center gap-2">
+                <span className="w-4 h-1.5 rounded-full bg-[#0EA5E9] inline-block shrink-0" />
+                เส้นทางเดิน
+              </span>
+            </div>
+          </div>
+        )}
 
-        <div className="pointer-events-auto rounded-xl bg-white/95 backdrop-blur border border-slate-200 shadow-md px-3.5 py-2 text-xs font-semibold text-[#0F766E]">
-          {mockGpsEnabled
-            ? "คลิกบนแผนที่เพื่อกำหนดตำแหน่งยืนจำลอง"
-            : "แตะตึกบนแผนที่เพื่อเลือกปลายทาง"}
-        </div>
+        <button
+          type="button"
+          onClick={() => setLegendOpen((prev) => !prev)}
+          title="คำอธิบายสี"
+          aria-expanded={legendOpen}
+          className={`h-9 px-3 rounded-xl border shadow-sm text-xs font-semibold inline-flex items-center gap-1.5 transition-colors cursor-pointer ${
+            legendOpen
+              ? "bg-[#0F766E] border-[#0F766E] text-white"
+              : "bg-white/95 backdrop-blur border-slate-200 text-slate-700 hover:bg-slate-50"
+          }`}
+        >
+          <Info className="w-3.5 h-3.5" />
+          <span>คำอธิบายสี</span>
+        </button>
       </div>
+      )}
     </div>
   );
 }

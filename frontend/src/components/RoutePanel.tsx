@@ -4,15 +4,14 @@ import {
   Accessibility,
   ArrowUpDown,
   Building2,
-  CheckCircle2,
   Clock,
-  Footprints,
   Info,
   Loader2,
   MapPin,
   Navigation,
   RefreshCw,
   ShieldAlert,
+  X,
 } from "lucide-react";
 import type { MapNode, RouteResponse } from "@/lib/api";
 import { buildTurnByTurnSteps, classifyBuilding } from "@/lib/hospital";
@@ -26,10 +25,13 @@ interface RoutePanelProps {
   routeData: RouteResponse | null;
   isLoadingRoute: boolean;
   routeError: string | null;
+  isNavigating?: boolean;
   onChangeOriginMode: (mode: "gps" | "building", buildingId?: number) => void;
   onSwapOriginAndTarget: () => void;
   onPickTargetTab: () => void;
   onRetryRoute: () => void;
+  onStartNavigation?: () => void;
+  onEndNavigation?: () => void;
   compactHeaderOnly?: boolean;
 }
 
@@ -42,10 +44,13 @@ export default function RoutePanel({
   routeData,
   isLoadingRoute,
   routeError,
+  isNavigating = false,
   onChangeOriginMode,
   onSwapOriginAndTarget,
   onPickTargetTab,
   onRetryRoute,
+  onStartNavigation,
+  onEndNavigation,
   compactHeaderOnly = false,
 }: RoutePanelProps) {
   const originDestinationCard = (
@@ -248,21 +253,38 @@ export default function RoutePanel({
             </div>
           </div>
 
-          {/* Accessibility & Status Pills */}
+          {/* Essential Accessibility Badge */}
           <div className="flex flex-wrap gap-2">
             <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-[#DBEAFE] text-[#1D4ED8] text-xs font-semibold">
               <Accessibility className="w-3.5 h-3.5" />
               <span>รองรับทางลาดรถเข็น</span>
             </span>
-            <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-[#CCFBF1] text-[#047857] text-xs font-semibold">
-              <CheckCircle2 className="w-3.5 h-3.5" />
-              <span>เส้นทางเปิดใช้งานปกติ</span>
-            </span>
-            <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-slate-100 text-slate-700 text-xs font-semibold">
-              <Footprints className="w-3.5 h-3.5" />
-              <span>ความเร็วเดิน ~80 ม./นาที</span>
-            </span>
           </div>
+
+          {/* Primary Start / End Active Navigation CTA */}
+          {onStartNavigation && (
+            <div>
+              {isNavigating ? (
+                <button
+                  type="button"
+                  onClick={onEndNavigation}
+                  className="w-full min-h-[48px] px-4 rounded-xl bg-[#BE123C] hover:bg-rose-800 text-white text-sm font-bold flex items-center justify-center gap-2 shadow-sm transition-colors cursor-pointer"
+                >
+                  <X className="w-4 h-4" />
+                  <span>สิ้นสุดการนำทาง</span>
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  onClick={onStartNavigation}
+                  className="w-full min-h-[48px] px-4 rounded-xl bg-[#0F766E] hover:bg-[#115E59] text-white text-sm font-bold flex items-center justify-center gap-2 shadow-sm transition-colors cursor-pointer"
+                >
+                  <Navigation className="w-4 h-4" />
+                  <span>เริ่มนำทาง</span>
+                </button>
+              )}
+            </div>
+          )}
 
           {/* Target Building Photo (if uploaded) */}
           {routeData.target_building.image_url && (

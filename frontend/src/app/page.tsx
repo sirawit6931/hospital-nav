@@ -9,6 +9,7 @@ import {
   Headphones,
   Loader2,
   Map as MapIcon,
+  Navigation,
   Search,
   ShieldAlert,
 } from "lucide-react";
@@ -19,11 +20,18 @@ import {
   calculateBearing,
   calculateDistanceMeters,
   classifyBuilding,
+  computeCompassHeadingFromOrientation,
   interpolateAlongPolyline,
   snapToPolyline,
   type FilterCategoryId,
 } from "@/lib/hospital";
 import type { MapViewMode } from "@/lib/hospital3d";
+import {
+  buildActiveNavigationSteps,
+  computeRouteProgress,
+  speakThaiNavigation,
+  stopThaiNavigationSpeech,
+} from "@/lib/navigation";
 import { rankBuildingsByQuery } from "@/lib/search";
 import HospitalHeader from "@/components/HospitalHeader";
 import BuildingSearchBar from "@/components/BuildingSearchBar";
@@ -82,8 +90,16 @@ export default function HomePage() {
   >("idle");
   const [userGpsCoords, setUserGpsCoords] =
     useState<[number, number]>(HOSPITAL_CENTER);
+  const [gpsAccuracyMeters, setGpsAccuracyMeters] = useState<number | null>(null);
   const [userHeadingDeg, setUserHeadingDeg] = useState<number>(0);
-  const hasCompassHeadingRef = useRef<boolean>(false);
+  const [followUser, setFollowUser] = useState<boolean>(false);
+  const [headingUpMode, setHeadingUpMode] = useState<boolean>(false);
+  const [locateTrigger, setLocateTrigger] = useState<number>(0);
+  const [compassPermissionVersion, setCompassPermissionVersion] = useState<number>(0);
+  const hasAbsoluteCompassRef = useRef<boolean>(false);
+  const lastCompassAtRef = useRef<number>(0);
+  const hasInitialGpsFixRef = useRef<boolean>(false);
+  const lastGoodAccuracyRef = useRef<number>(999);
   const prevMovementCoordsRef = useRef<[number, number]>(HOSPITAL_CENTER);
 
   const [originMode, setOriginMode] = useState<"gps" | "building">("gps");
@@ -100,6 +116,14 @@ export default function HomePage() {
   const [mockGpsEnabled, setMockGpsEnabled] = useState(false);
   const [isMockWalking, setIsMockWalking] = useState(false);
   const [mockWalkProgress, setMockWalkProgress] = useState(0);
+
+  // Active Turn-by-Turn Navigation Mode (Google Maps style)
+  const [isNavigating, setIsNavigating] = useState(false);
+  const [voiceEnabled, setVoiceEnabled] = useState(true);
+  const [isSimulatingWalk, setIsSimulatingWalk] = useState(false);
+  const [recenterTrigger, setRecenterTrigger] = useState(0);
+  const simDistanceRef = useRef<number>(0);
+  const spokenKeysRef = useRef<Set<string>>(new Set());
 
   // Arrival Detection Modal state
   const [showArrivalModal, setShowArrivalModal] = useState(false);
@@ -145,6 +169,24 @@ export default function HomePage() {
 
   const displayOriginCoords = snapResult.snappedCoords;
 
+  // Active Turn-by-Turn Steps & Live Progression (passed vs remaining path, distance to next turn, ETA)
+  const navSteps = useMemo(
+    () => buildActiveNavigationSteps(routeData),
+    [routeData]
+  );
+
+  const navProgress = useMemo(() => {
+    if (!routeData?.path || routeData.path.length === 0 || navSteps.length === 0) {
+      return null;
+    }
+    return computeRouteProgress(
+      rawOriginCoords,
+      routeData.path,
+      navSteps,
+      ARRIVAL_THRESHOLD_METERS
+    );
+  }, [rawOriginCoords, routeData, navSteps]);
+
   // 2. Real-time distance to destination building
   const distanceToTargetMeters = useMemo(() => {
     if (!targetBuilding) return null;
@@ -189,54 +231,160 @@ export default function HomePage() {
     }
   }, []);
 
-  const acquireGpsLocation = useCallback(() => {
-    if (typeof window === "undefined") return;
+  const applyLiveGpsPosition = useCallback((pos: GeolocationPosition) => {
+    const rawLat = pos.coords.latitude;
+    const rawLng = pos.coords.longitude;
+    const accuracy =
+      typeof pos.coords.accuracy === "number" && !Number.isNaN(pos.coords.accuracy)
+        ? pos.coords.accuracy
+        : 25;
 
-    // Request iOS Safari compass permission if supported (must be called from user gesture)
+    setGpsAccuracyMeters(Math.round(accuracy));
+    setGpsStatus("ready");
+
+    // Reject sudden noisy indoor GPS outliers (> 65m) once we already have an accurate lock
+    if (
+      hasInitialGpsFixRef.current &&
+      accuracy > 65 &&
+      lastGoodAccuracyRef.current <= 30
+    ) {
+      return;
+    }
+
+    if (accuracy < lastGoodAccuracyRef.current) {
+      lastGoodAccuracyRef.current = accuracy;
+    }
+
+    setUserGpsCoords((prev) => {
+      if (!hasInitialGpsFixRef.current) {
+        hasInitialGpsFixRef.current = true;
+        prevMovementCoordsRef.current = [rawLat, rawLng];
+        return [rawLat, rawLng];
+      }
+
+      const jumpMeters = calculateDistanceMeters(
+        prev[0],
+        prev[1],
+        rawLat,
+        rawLng
+      );
+
+      // Adaptive smoothing: suppress standing-still jitter while staying instant when walking
+      let alpha = 1;
+      if (jumpMeters < 1.2 && accuracy > 8) {
+        alpha = 0.25;
+      } else if (jumpMeters < 8) {
+        alpha = 0.65;
+      }
+
+      return [
+        prev[0] + (rawLat - prev[0]) * alpha,
+        prev[1] + (rawLng - prev[1]) * alpha,
+      ];
+    });
+
+    // Use GPS course heading as fallback when walking (>= 0.5 m/s) and no live compass signal
+    const hasFreshCompass =
+      hasAbsoluteCompassRef.current &&
+      Date.now() - lastCompassAtRef.current < 4000;
+    const speed = typeof pos.coords.speed === "number" ? pos.coords.speed : 0;
+    if (
+      !hasFreshCompass &&
+      typeof pos.coords.heading === "number" &&
+      !Number.isNaN(pos.coords.heading) &&
+      pos.coords.heading >= 0 &&
+      (speed >= 0.5 || pos.coords.speed === null)
+    ) {
+      const gpsHeading = ((pos.coords.heading % 360) + 360) % 360;
+      setUserHeadingDeg((prev) => {
+        const diff = ((gpsHeading - prev + 540) % 360) - 180;
+        return ((prev + diff * 0.45) % 360 + 360) % 360;
+      });
+    }
+  }, []);
+
+  const requestCompassPermission = useCallback(() => {
+    if (typeof window === "undefined") return;
     const DeviceOrientationWithPermission = window.DeviceOrientationEvent as
       | (typeof DeviceOrientationEvent & {
           requestPermission?: () => Promise<"granted" | "denied">;
         })
       | undefined;
     if (typeof DeviceOrientationWithPermission?.requestPermission === "function") {
-      DeviceOrientationWithPermission.requestPermission().catch(() => {
-        // Ignore if user declines or not in gesture context
-      });
+      DeviceOrientationWithPermission.requestPermission()
+        .then((res) => {
+          if (res === "granted") {
+            setCompassPermissionVersion((v) => v + 1);
+          }
+        })
+        .catch(() => {
+          // Ignore if declined or not triggered from user gesture
+        });
     }
-
-    if (!navigator.geolocation) {
-      setGpsStatus("fallback");
-      return;
-    }
-    setMockGpsEnabled(false);
-    setIsMockWalking(false);
-    setGpsStatus("locating");
-    navigator.geolocation.getCurrentPosition(
-      (pos) => {
-        setUserGpsCoords([pos.coords.latitude, pos.coords.longitude]);
-        if (
-          typeof pos.coords.heading === "number" &&
-          !Number.isNaN(pos.coords.heading) &&
-          pos.coords.heading >= 0
-        ) {
-          setUserHeadingDeg(pos.coords.heading);
-        }
-        setGpsStatus("ready");
-      },
-      () => {
-        setGpsStatus("fallback");
-      },
-      {
-        enableHighAccuracy: true,
-        timeout: 8000,
-        maximumAge: 10000,
-      }
-    );
   }, []);
+
+  const acquireGpsLocation = useCallback(
+    (fromUserGesture = false) => {
+      if (typeof window === "undefined") return;
+
+      if (fromUserGesture) {
+        requestCompassPermission();
+        setFollowUser(true);
+        setLocateTrigger((n) => n + 1);
+      }
+
+      if (!navigator.geolocation) {
+        setGpsStatus("fallback");
+        return;
+      }
+      setMockGpsEnabled(false);
+      setIsMockWalking(false);
+      setOriginMode("gps");
+      setOriginBuildingId(null);
+      if (!hasInitialGpsFixRef.current) {
+        setGpsStatus("locating");
+      }
+
+      navigator.geolocation.getCurrentPosition(
+        (pos) => {
+          applyLiveGpsPosition(pos);
+          if (fromUserGesture) {
+            setLocateTrigger((n) => n + 1);
+          }
+        },
+        () => {
+          if (!hasInitialGpsFixRef.current) {
+            setGpsStatus("fallback");
+          }
+        },
+        {
+          enableHighAccuracy: true,
+          timeout: 12000,
+          maximumAge: 0,
+        }
+      );
+    },
+    [applyLiveGpsPosition, requestCompassPermission]
+  );
+
+  const handleLocateMeClick = useCallback(() => {
+    acquireGpsLocation(true);
+  }, [acquireGpsLocation]);
+
+  const handleToggleHeadingUp = useCallback(() => {
+    requestCompassPermission();
+    setHeadingUpMode((prev) => {
+      const next = !prev;
+      if (next) {
+        setFollowUser(true);
+      }
+      return next;
+    });
+  }, [requestCompassPermission]);
 
   useEffect(() => {
     fetchBuildings("");
-    acquireGpsLocation();
+    acquireGpsLocation(false);
   }, [fetchBuildings, acquireGpsLocation]);
 
   // Track desktop vs mobile breakpoint so only one WebGL/Leaflet map mounts at a time
@@ -249,96 +397,91 @@ export default function HomePage() {
     return () => mq.removeEventListener("change", update);
   }, []);
 
-  // Continuous Real-Time GPS Watch while actively navigating (disabled during Mock GPS or Building origin)
+  // Continuous Real-Time GPS Watch whenever in live GPS mode (paused during Mock GPS or Simulate Walk)
   useEffect(() => {
     if (
       typeof window === "undefined" ||
       !navigator.geolocation ||
-      !targetBuilding ||
       originMode !== "gps" ||
-      mockGpsEnabled
+      mockGpsEnabled ||
+      isSimulatingWalk
     ) {
       return;
     }
 
     const watchId = navigator.geolocation.watchPosition(
       (pos) => {
-        setUserGpsCoords([pos.coords.latitude, pos.coords.longitude]);
-        if (
-          !hasCompassHeadingRef.current &&
-          typeof pos.coords.heading === "number" &&
-          !Number.isNaN(pos.coords.heading) &&
-          pos.coords.heading >= 0
-        ) {
-          setUserHeadingDeg(pos.coords.heading);
-        }
-        setGpsStatus("ready");
+        applyLiveGpsPosition(pos);
       },
       () => {
         // Keep last known position gracefully on temporary GPS hiccup
       },
       {
         enableHighAccuracy: true,
-        maximumAge: 2000,
-        timeout: 10000,
+        maximumAge: 0,
+        timeout: 15000,
       }
     );
 
     return () => {
       navigator.geolocation.clearWatch(watchId);
     };
-  }, [targetBuilding, originMode, mockGpsEnabled]);
+  }, [originMode, mockGpsEnabled, applyLiveGpsPosition]);
 
-  // Real-time mobile compass heading (DeviceOrientationEvent) with smooth shortest-angle interpolation
+  // Real-time True-North Tilt-Compensated Compass (Android deviceorientationabsolute + iOS webkitCompassHeading)
   useEffect(() => {
     if (typeof window === "undefined" || mockGpsEnabled) return;
 
-    const handleOrientation = (ev: DeviceOrientationEvent) => {
-      const webkitHeading = (
-        ev as DeviceOrientationEvent & { webkitCompassHeading?: number }
-      ).webkitCompassHeading;
-
-      let heading: number | null = null;
-      if (typeof webkitHeading === "number" && !Number.isNaN(webkitHeading)) {
-        heading = webkitHeading;
-      } else if (typeof ev.alpha === "number" && !Number.isNaN(ev.alpha)) {
-        // Screen-orientation adjusted heading on Android Chrome
-        const screenAngle =
-          typeof window.screen?.orientation?.angle === "number"
-            ? window.screen.orientation.angle
-            : 0;
-        heading = (360 - ev.alpha + screenAngle) % 360;
-      }
-
-      if (heading === null) return;
-      hasCompassHeadingRef.current = true;
+    const applyCompassReading = (heading: number) => {
+      hasAbsoluteCompassRef.current = true;
+      lastCompassAtRef.current = Date.now();
       const normalized = ((heading % 360) + 360) % 360;
 
       setUserHeadingDeg((prev) => {
         const diff = ((normalized - prev + 540) % 360) - 180;
-        if (Math.abs(diff) < 1.5) return prev;
-        return ((prev + diff * 0.35) % 360 + 360) % 360;
+        if (Math.abs(diff) < 1.2) return prev;
+        return ((prev + diff * 0.32) % 360 + 360) % 360;
       });
+    };
+
+    const handleAbsoluteOrientation = (ev: DeviceOrientationEvent) => {
+      const heading = computeCompassHeadingFromOrientation(ev);
+      if (heading !== null) {
+        applyCompassReading(heading);
+      }
+    };
+
+    const handleStandardOrientation = (ev: DeviceOrientationEvent) => {
+      // Only accept iOS webkitCompassHeading or events explicitly marked absolute === true.
+      // Never accept non-absolute Android deviceorientation (its 0 deg is NOT North!).
+      const heading = computeCompassHeadingFromOrientation(ev);
+      if (heading !== null) {
+        applyCompassReading(heading);
+      }
     };
 
     window.addEventListener(
       "deviceorientationabsolute",
-      handleOrientation as EventListener,
+      handleAbsoluteOrientation as EventListener,
       true
     );
-    window.addEventListener("deviceorientation", handleOrientation, true);
+    window.addEventListener("deviceorientation", handleStandardOrientation, true);
 
     return () => {
       window.removeEventListener(
         "deviceorientationabsolute",
-        handleOrientation as EventListener,
+        handleAbsoluteOrientation as EventListener,
         true
       );
-      window.removeEventListener("deviceorientation", handleOrientation, true);
+      window.removeEventListener(
+        "deviceorientation",
+        handleStandardOrientation,
+        true
+      );
     };
-  }, [mockGpsEnabled]);
+  }, [mockGpsEnabled, compassPermissionVersion]);
 
-  // Update heading automatically from movement vector (works great in Mock GPS / Desktop & walking without compass)
+  // Update heading automatically from walking movement vector (used in Mock GPS or devices without magnetometer)
   useEffect(() => {
     const prev = prevMovementCoordsRef.current;
     const moved = calculateDistanceMeters(
@@ -347,23 +490,32 @@ export default function HomePage() {
       displayOriginCoords[0],
       displayOriginCoords[1]
     );
-    if (moved >= 1.5) {
-      if (mockGpsEnabled || !hasCompassHeadingRef.current) {
+    if (moved >= 2.0) {
+      const hasFreshCompass =
+        hasAbsoluteCompassRef.current &&
+        Date.now() - lastCompassAtRef.current < 4000;
+      if (mockGpsEnabled || !hasFreshCompass) {
         const moveBearing = calculateBearing(
           prev[0],
           prev[1],
           displayOriginCoords[0],
           displayOriginCoords[1]
         );
-        setUserHeadingDeg(moveBearing);
+        setUserHeadingDeg((prevDeg) => {
+          const diff = ((moveBearing - prevDeg + 540) % 360) - 180;
+          return ((prevDeg + diff * 0.65) % 360 + 360) % 360;
+        });
       }
       prevMovementCoordsRef.current = displayOriginCoords;
     }
   }, [displayOriginCoords, mockGpsEnabled]);
 
-  // Point directional triangle along the start of a newly loaded route when standing still on desktop
+  // Point directional triangle along the start of a newly loaded route when standing still without compass
   useEffect(() => {
-    if (hasCompassHeadingRef.current && !mockGpsEnabled) return;
+    const hasFreshCompass =
+      hasAbsoluteCompassRef.current &&
+      Date.now() - lastCompassAtRef.current < 4000;
+    if (hasFreshCompass && !mockGpsEnabled) return;
     if (routeData?.path && routeData.path.length >= 2) {
       const [p0, p1] = routeData.path;
       setUserHeadingDeg(calculateBearing(p0[0], p0[1], p1[0], p1[1]));
@@ -431,6 +583,7 @@ export default function HomePage() {
       !routeData ||
       originMode !== "gps" ||
       isMockWalking ||
+      isSimulatingWalk ||
       !snapResult.isOffRoute
     ) {
       return;
@@ -473,6 +626,7 @@ export default function HomePage() {
     if (distanceToTargetMeters < ARRIVAL_THRESHOLD_METERS) {
       setHasArrivedCurrentTarget(true);
       setIsMockWalking(false);
+      setIsSimulatingWalk(false);
       if (dismissedArrivalKeyRef.current !== arrivalKey) {
         setShowArrivalModal(true);
       }
@@ -508,11 +662,200 @@ export default function HomePage() {
     return () => clearInterval(timer);
   }, [mockGpsEnabled, isMockWalking, routeData]);
 
+  // Active Navigation: Smooth 1.4 m/s Simulate Walk along real route path (for Desktop testing)
+  useEffect(() => {
+    if (!isNavigating || !isSimulatingWalk || !routeData?.path || routeData.path.length < 2) {
+      return;
+    }
+    const totalDistM = Math.max(1, navProgress?.totalDistanceM ?? routeData.total_distance_m ?? 1);
+    const tickMs = 100;
+    const stepMetersPerTick = 1.4 * (tickMs / 1000); // 1.4 m/s realistic walking speed
+
+    const timer = setInterval(() => {
+      const nextDist = Math.min(totalDistM, simDistanceRef.current + stepMetersPerTick);
+      const prevCoord = interpolateAlongPolyline(
+        routeData.path,
+        simDistanceRef.current / totalDistM
+      );
+      const nextCoord = interpolateAlongPolyline(
+        routeData.path,
+        nextDist / totalDistM
+      );
+      simDistanceRef.current = nextDist;
+
+      if (nextCoord) {
+        setUserGpsCoords(nextCoord);
+        if (prevCoord) {
+          const moved = calculateDistanceMeters(
+            prevCoord[0],
+            prevCoord[1],
+            nextCoord[0],
+            nextCoord[1]
+          );
+          if (moved >= 0.05) {
+            setUserHeadingDeg(
+              calculateBearing(prevCoord[0], prevCoord[1], nextCoord[0], nextCoord[1])
+            );
+          }
+        }
+      }
+
+      if (nextDist >= totalDistM) {
+        setIsSimulatingWalk(false);
+      }
+    }, tickMs);
+
+    return () => clearInterval(timer);
+  }, [isNavigating, isSimulatingWalk, routeData, navProgress?.totalDistanceM]);
+
+  // Active Navigation: Thai Voice Guidance (speaks once per approaching turn <= 15m & on arrival)
+  useEffect(() => {
+    if (!isNavigating || !voiceEnabled || !navProgress || !routeData) return;
+
+    const routeKey = `${routeData.target_building.id}-${routeData.path.length}-${Math.round(
+      routeData.total_distance_m
+    )}`;
+
+    if (navProgress.hasArrived) {
+      const arriveKey = `${routeKey}-arrive`;
+      if (!spokenKeysRef.current.has(arriveKey)) {
+        spokenKeysRef.current.add(arriveKey);
+        speakThaiNavigation(
+          `ถึงจุดหมายแล้ว ${routeData.target_building.name}`,
+          voiceEnabled
+        );
+      }
+      return;
+    }
+
+    if (
+      navProgress.nextStep &&
+      navProgress.nextStep.direction !== "arrive" &&
+      navProgress.distanceToNextTurnM <= 15
+    ) {
+      const turnKey = `${routeKey}-turn-${navProgress.nextStep.index}`;
+      if (!spokenKeysRef.current.has(turnKey)) {
+        spokenKeysRef.current.add(turnKey);
+        const distSpeech =
+          navProgress.distanceToNextTurnM <= 3
+            ? ""
+            : `อีก ${navProgress.distanceToNextTurnM} เมตร `;
+        speakThaiNavigation(
+          `${distSpeech}${navProgress.nextStep.instruction}`,
+          voiceEnabled
+        );
+      }
+    }
+  }, [isNavigating, voiceEnabled, navProgress, routeData]);
+
+  // Cleanup voice synthesis on unmount
+  useEffect(() => {
+    return () => {
+      stopThaiNavigationSpeech();
+    };
+  }, []);
+
+  const handleStartNavigation = useCallback(() => {
+    if (!routeData || !targetBuilding) return;
+    requestCompassPermission();
+    dismissedArrivalKeyRef.current = null;
+    setShowArrivalModal(false);
+    setHasArrivedCurrentTarget(false);
+    setIsMockWalking(false);
+    setIsSimulatingWalk(false);
+    setMockGpsEnabled(false);
+    spokenKeysRef.current.clear();
+
+    // If starting from a chosen building origin, place starting point cleanly at route start
+    if (originMode === "building" && routeData.path.length > 0) {
+      setOriginMode("gps");
+      setOriginBuildingId(null);
+      setUserGpsCoords(routeData.path[0]);
+    }
+    simDistanceRef.current = 0;
+
+    setActiveTab("route");
+    setSheetExpanded(false);
+    setFollowUser(true);
+    setHeadingUpMode(true);
+    setIsNavigating(true);
+
+    const firstInstruction = navSteps[0]?.instruction || "เดินตรงไปตามเส้นทาง";
+    const startKey = `${routeData.target_building.id}-start`;
+    spokenKeysRef.current.add(startKey);
+    speakThaiNavigation(
+      `เริ่มนำทางไปยัง ${routeData.target_building.name} ${firstInstruction}`,
+      voiceEnabled
+    );
+  }, [
+    routeData,
+    targetBuilding,
+    originMode,
+    navSteps,
+    voiceEnabled,
+    requestCompassPermission,
+  ]);
+
+  const handleEndNavigation = useCallback(() => {
+    setIsNavigating(false);
+    setIsSimulatingWalk(false);
+    setFollowUser(false);
+    setHeadingUpMode(false);
+    stopThaiNavigationSpeech();
+  }, []);
+
+  const handleRecenterNavigation = useCallback(() => {
+    setFollowUser(true);
+    setHeadingUpMode(true);
+    setRecenterTrigger((n) => n + 1);
+  }, []);
+
+  const handleToggleVoice = useCallback(() => {
+    setVoiceEnabled((prev) => {
+      const next = !prev;
+      if (!next) {
+        stopThaiNavigationSpeech();
+      }
+      return next;
+    });
+  }, []);
+
+  const handleToggleSimulateWalk = useCallback(() => {
+    if (!routeData?.path || routeData.path.length < 2) return;
+    setIsSimulatingWalk((prev) => {
+      const next = !prev;
+      if (next) {
+        setOriginMode("gps");
+        setOriginBuildingId(null);
+        setMockGpsEnabled(false);
+        setIsMockWalking(false);
+        setFollowUser(true);
+        setHeadingUpMode(true);
+        const totalM = navProgress?.totalDistanceM ?? routeData.total_distance_m ?? 0;
+        const currM = navProgress?.traveledDistanceM ?? 0;
+        if (navProgress?.hasArrived || currM >= totalM - 5) {
+          // Restart simulation cleanly from the beginning of the route
+          simDistanceRef.current = 0;
+          dismissedArrivalKeyRef.current = null;
+          setShowArrivalModal(false);
+          spokenKeysRef.current.clear();
+          setUserGpsCoords(routeData.path[0]);
+        } else {
+          simDistanceRef.current = currM;
+        }
+      }
+      return next;
+    });
+  }, [routeData, navProgress]);
+
   const handleSelectRoute = useCallback((building: MapNode) => {
     dismissedArrivalKeyRef.current = null;
     setShowArrivalModal(false);
     setHasArrivedCurrentTarget(false);
     setIsMockWalking(false);
+    setIsSimulatingWalk(false);
+    setIsNavigating(false);
+    stopThaiNavigationSpeech();
     setMockWalkProgress(0);
     setTargetBuilding(building);
     setFocusedNode(building);
@@ -812,6 +1155,7 @@ export default function HomePage() {
     routeData,
     isLoadingRoute,
     routeError,
+    isNavigating,
     onChangeOriginMode: handleChangeOriginMode,
     onSwapOriginAndTarget: handleSwapOriginAndTarget,
     onPickTargetTab: () => setActiveTab("buildings"),
@@ -821,6 +1165,8 @@ export default function HomePage() {
         fetchRoute(rawOriginCoords, targetBuilding);
       }
     },
+    onStartNavigation: handleStartNavigation,
+    onEndNavigation: handleEndNavigation,
   };
 
   const sharedMapProps = {
@@ -830,17 +1176,33 @@ export default function HomePage() {
     displayOriginCoords,
     rawOriginCoords,
     userHeadingDeg,
+    gpsStatus,
+    gpsAccuracyMeters,
+    followUser,
+    headingUpMode,
+    locateTrigger,
     isSnappedToPath: snapResult.isSnapped,
     isAutoRerouting,
     distanceToTargetMeters,
     focusedNode,
     targetBuilding,
     routeData,
+    isNavigating,
+    navProgress,
+    voiceEnabled,
+    isSimulatingWalk,
+    recenterTrigger,
     mockGpsEnabled,
     isMockWalking,
     mockWalkProgress,
     onSelectBuilding: handleSelectRoute,
-    onLocateMe: acquireGpsLocation,
+    onLocateMe: handleLocateMeClick,
+    onChangeFollowUser: setFollowUser,
+    onToggleHeadingUp: handleToggleHeadingUp,
+    onToggleVoice: handleToggleVoice,
+    onToggleSimulateWalk: handleToggleSimulateWalk,
+    onEndNavigation: handleEndNavigation,
+    onRecenterNavigation: handleRecenterNavigation,
     onToggleMockGps: handleToggleMockGps,
     onMockMapClick: handleMockMapClick,
     onToggleMockWalk: handleToggleMockWalk,
@@ -859,7 +1221,7 @@ export default function HomePage() {
     <div className="h-dvh w-full overflow-hidden flex flex-col md:flex-row bg-[#F8FAFC]">
       {/* ================= DESKTOP / TABLET LEFT SIDEBAR (420px) ================= */}
       <aside className="hidden md:flex md:w-[420px] md:shrink-0 h-full flex-col border-r border-slate-200 bg-[#F8FAFC]">
-        <HospitalHeader gpsStatus={gpsStatus} onLocateMe={acquireGpsLocation} />
+        <HospitalHeader gpsStatus={gpsStatus} onLocateMe={handleLocateMeClick} />
 
         {/* Desktop Tab Bar */}
         <nav
@@ -924,128 +1286,149 @@ export default function HomePage() {
 
       {/* ================= MOBILE FULL-EXPERIENCE WEB APP (< 768px) ================= */}
       <div className="flex md:hidden flex-col h-dvh w-full overflow-hidden">
-        <HospitalHeader gpsStatus={gpsStatus} onLocateMe={acquireGpsLocation} />
+        {/* Hide header during Active Navigation on Mobile for full-screen Google Maps experience */}
+        {!isNavigating && (
+          <HospitalHeader gpsStatus={gpsStatus} onLocateMe={handleLocateMeClick} />
+        )}
 
         {/* Mobile Main Stage */}
         <div className="flex-1 min-h-0 relative overflow-hidden">
-          {activeTab === "buildings" && (
+          {!isNavigating && activeTab === "buildings" && (
             <div className="h-full overflow-y-auto p-4">{searchContent}</div>
           )}
 
-          {activeTab === "services" && (
+          {!isNavigating && activeTab === "services" && (
             <div className="h-full overflow-y-auto p-4">
               <ServiceDirectory />
             </div>
           )}
 
-          {activeTab === "route" && (
+          {(isNavigating || activeTab === "route") && (
             <div className="h-full w-full relative flex flex-col">
               {/* Full-screen Map behind Bottom Sheet */}
               <div className="flex-1 relative min-h-0">
                 {!isDesktopViewport ? activeMapElement : null}
 
-                {/* Mobile Slide-Up Bottom Sheet */}
-                <div
-                  className={`absolute inset-x-0 bottom-0 z-[500] bg-[#F8FAFC] rounded-t-3xl border-t border-slate-200 shadow-[0_-10px_30px_rgba(15,23,42,0.18)] transition-all duration-300 flex flex-col ${
-                    sheetExpanded ? "max-h-[72%]" : "max-h-[112px]"
-                  }`}
-                >
-                  <button
-                    type="button"
-                    onClick={() => setSheetExpanded((prev) => !prev)}
-                    className="w-full pt-2.5 pb-2 px-4 flex flex-col items-center gap-1 shrink-0 cursor-pointer"
-                    aria-label={
-                      sheetExpanded
-                        ? "ย่อแผงรายละเอียดเส้นทาง"
-                        : "ขยายแผงรายละเอียดเส้นทาง"
-                    }
+                {/* Mobile Slide-Up Bottom Sheet (hidden during Active Navigation Mode) */}
+                {!isNavigating && (
+                  <div
+                    className={`absolute inset-x-0 bottom-0 z-[500] bg-[#F8FAFC] rounded-t-3xl border-t border-slate-200 shadow-[0_-10px_30px_rgba(15,23,42,0.18)] transition-all duration-300 flex flex-col ${
+                      sheetExpanded ? "max-h-[72%]" : "max-h-[126px]"
+                    }`}
                   >
-                    <span className="w-10 h-1.5 rounded-full bg-slate-300" />
-                    <div className="w-full flex items-center justify-between pt-1">
-                      <span className="font-heading text-sm font-bold text-[#0F172A] truncate">
-                        {routeData
-                          ? `${routeData.target_building.name} • ${Math.max(
-                              1,
-                              Math.round(routeData.estimated_walk_min)
-                            )} นาที (${Math.round(
-                              routeData.total_distance_m
-                            )} ม.)`
-                          : targetBuilding
-                          ? targetBuilding.name
-                          : "รายละเอียดเส้นทางเดิน"}
-                      </span>
-                      <span className="inline-flex items-center gap-1 text-xs font-bold text-[#0F766E] shrink-0">
-                        {sheetExpanded ? (
-                          <>
-                            <span>ดูแผนที่</span>
-                            <ChevronDown className="w-4 h-4" />
-                          </>
-                        ) : (
-                          <>
-                            <span>รายละเอียด</span>
-                            <ChevronUp className="w-4 h-4" />
-                          </>
-                        )}
-                      </span>
-                    </div>
-                  </button>
+                    <div className="w-full pt-2.5 pb-2 px-4 flex flex-col items-center gap-1.5 shrink-0">
+                      <button
+                        type="button"
+                        onClick={() => setSheetExpanded((prev) => !prev)}
+                        className="w-full flex flex-col items-center gap-1 cursor-pointer"
+                        aria-label={
+                          sheetExpanded
+                            ? "ย่อแผงรายละเอียดเส้นทาง"
+                            : "ขยายแผงรายละเอียดเส้นทาง"
+                        }
+                      >
+                        <span className="w-10 h-1.5 rounded-full bg-slate-300" />
+                        <div className="w-full flex items-center justify-between pt-1 gap-2">
+                          <span className="font-heading text-sm font-bold text-[#0F172A] truncate">
+                            {routeData
+                              ? `${routeData.target_building.name} • ${Math.max(
+                                  1,
+                                  Math.round(routeData.estimated_walk_min)
+                                )} นาที (${Math.round(
+                                  routeData.total_distance_m
+                                )} ม.)`
+                              : targetBuilding
+                              ? targetBuilding.name
+                              : "รายละเอียดเส้นทางเดิน"}
+                          </span>
+                          <span className="inline-flex items-center gap-1 text-xs font-bold text-[#0F766E] shrink-0">
+                            {sheetExpanded ? (
+                              <>
+                                <span>ดูแผนที่</span>
+                                <ChevronDown className="w-4 h-4" />
+                              </>
+                            ) : (
+                              <>
+                                <span>รายละเอียด</span>
+                                <ChevronUp className="w-4 h-4" />
+                              </>
+                            )}
+                          </span>
+                        </div>
+                      </button>
 
-                  {sheetExpanded && (
-                    <div className="overflow-y-auto px-4 pb-4 flex-1">
-                      {arrivalBannerInPanel}
-                      <RoutePanel {...routePanelProps} />
+                      {/* 1-tap Start Navigation button visible even when Bottom Sheet is collapsed */}
+                      {!sheetExpanded && routeData && (
+                        <button
+                          type="button"
+                          onClick={handleStartNavigation}
+                          className="w-full min-h-[42px] px-4 rounded-xl bg-[#0F766E] hover:bg-[#115E59] text-white text-sm font-bold flex items-center justify-center gap-2 shadow-sm cursor-pointer"
+                        >
+                          <Navigation className="w-4 h-4" />
+                          <span>เริ่มนำทาง</span>
+                        </button>
+                      )}
                     </div>
-                  )}
-                </div>
+
+                    {sheetExpanded && (
+                      <div className="overflow-y-auto px-4 pb-4 flex-1">
+                        {arrivalBannerInPanel}
+                        <RoutePanel {...routePanelProps} />
+                      </div>
+                    )}
+                  </div>
+                )}
               </div>
             </div>
           )}
         </div>
 
-        {/* Mobile Bottom Navigation Bar */}
-        <nav
-          aria-label="แถบเมนูล่าง"
-          className="shrink-0 bg-white border-t border-slate-200 px-2 py-1.5 grid grid-cols-3 gap-1.5 shadow-[0_-2px_10px_rgba(15,23,42,0.05)]"
-        >
-          <button
-            type="button"
-            onClick={() => setActiveTab("buildings")}
-            className={`min-h-[52px] rounded-xl flex flex-col items-center justify-center gap-0.5 text-xs font-bold transition-colors cursor-pointer ${
-              activeTab === "buildings"
-                ? "bg-[#CCFBF1] text-[#0F766E]"
-                : "text-slate-600 hover:bg-slate-50"
-            }`}
+        {/* Mobile Bottom Navigation Bar (hidden during Active Navigation for full-screen map) */}
+        {!isNavigating && (
+          <nav
+            aria-label="แถบเมนูล่าง"
+            className="shrink-0 bg-white border-t border-slate-200 px-2 py-1.5 grid grid-cols-3 gap-1.5 shadow-[0_-2px_10px_rgba(15,23,42,0.05)]"
           >
-            <Search className="w-5 h-5" />
-            <span>ค้นหาตึก</span>
-          </button>
+            <button
+              type="button"
+              onClick={() => setActiveTab("buildings")}
+              className={`min-h-[52px] rounded-xl flex flex-col items-center justify-center gap-0.5 text-xs font-bold transition-colors cursor-pointer ${
+                activeTab === "buildings"
+                  ? "bg-[#CCFBF1] text-[#0F766E]"
+                  : "text-slate-600 hover:bg-slate-50"
+              }`}
+            >
+              <Search className="w-5 h-5" />
+              <span>ค้นหาตึก</span>
+            </button>
 
-          <button
-            type="button"
-            onClick={() => setActiveTab("route")}
-            className={`min-h-[52px] rounded-xl flex flex-col items-center justify-center gap-0.5 text-xs font-bold transition-colors cursor-pointer ${
-              activeTab === "route"
-                ? "bg-[#CCFBF1] text-[#0F766E]"
-                : "text-slate-600 hover:bg-slate-50"
-            }`}
-          >
-            <MapIcon className="w-5 h-5" />
-            <span>เส้นทาง</span>
-          </button>
+            <button
+              type="button"
+              onClick={() => setActiveTab("route")}
+              className={`min-h-[52px] rounded-xl flex flex-col items-center justify-center gap-0.5 text-xs font-bold transition-colors cursor-pointer ${
+                activeTab === "route"
+                  ? "bg-[#CCFBF1] text-[#0F766E]"
+                  : "text-slate-600 hover:bg-slate-50"
+              }`}
+            >
+              <MapIcon className="w-5 h-5" />
+              <span>เส้นทาง</span>
+            </button>
 
-          <button
-            type="button"
-            onClick={() => setActiveTab("services")}
-            className={`min-h-[52px] rounded-xl flex flex-col items-center justify-center gap-0.5 text-xs font-bold transition-colors cursor-pointer ${
-              activeTab === "services"
-                ? "bg-[#CCFBF1] text-[#0F766E]"
-                : "text-slate-600 hover:bg-slate-50"
-            }`}
-          >
-            <Headphones className="w-5 h-5" />
-            <span>จุดบริการ</span>
-          </button>
-        </nav>
+            <button
+              type="button"
+              onClick={() => setActiveTab("services")}
+              className={`min-h-[52px] rounded-xl flex flex-col items-center justify-center gap-0.5 text-xs font-bold transition-colors cursor-pointer ${
+                activeTab === "services"
+                  ? "bg-[#CCFBF1] text-[#0F766E]"
+                  : "text-slate-600 hover:bg-slate-50"
+              }`}
+            >
+              <Headphones className="w-5 h-5" />
+              <span>จุดบริการ</span>
+            </button>
+          </nav>
+        )}
       </div>
 
       {/* Real-time Arrival Detection Modal (< 15m from destination) */}
@@ -1060,6 +1443,7 @@ export default function HomePage() {
           onSearchAnother={() => {
             dismissedArrivalKeyRef.current = `${targetBuilding.id}`;
             setShowArrivalModal(false);
+            handleEndNavigation();
             setActiveTab("buildings");
           }}
         />

@@ -1,22 +1,53 @@
 "use client";
 
-import Link from "next/link";
-import { Crosshair, Hospital, Lock } from "lucide-react";
+import { useRef } from "react";
+import { useRouter } from "next/navigation";
+import { Crosshair } from "lucide-react";
 
 interface HospitalHeaderProps {
   gpsStatus: "idle" | "locating" | "ready" | "fallback";
   onLocateMe: () => void;
 }
 
+const ADMIN_SECRET_TAPS = 5;
+const TAP_WINDOW_MS = 1800;
+
 export default function HospitalHeader({
   gpsStatus,
   onLocateMe,
 }: HospitalHeaderProps) {
+  const router = useRouter();
+  const tapCountRef = useRef(0);
+  const lastTapAtRef = useRef(0);
+
+  const handleLogoTap = () => {
+    const now = Date.now();
+    if (now - lastTapAtRef.current > TAP_WINDOW_MS) {
+      tapCountRef.current = 1;
+    } else {
+      tapCountRef.current += 1;
+    }
+    lastTapAtRef.current = now;
+
+    if (tapCountRef.current >= ADMIN_SECRET_TAPS) {
+      tapCountRef.current = 0;
+      router.push("/admin/login");
+    }
+  };
+
   return (
     <header className="shrink-0 bg-white border-b border-slate-200 px-4 py-3 flex items-center justify-between gap-3">
       <div className="flex items-center gap-3 min-w-0">
-        <div className="w-11 h-11 rounded-xl bg-[#0F766E] text-white flex items-center justify-center shrink-0 shadow-sm">
-          <Hospital className="w-6 h-6" strokeWidth={2.2} />
+        <div
+          onClick={handleLogoTap}
+          className="h-12 w-auto flex items-center justify-center shrink-0 select-none"
+        >
+          {/* eslint-disable-next-line @next/next/no-img-element */}
+          <img
+            src="/sakon-hospital-logo.png"
+            alt="โลโก้โรงพยาบาลสกลนคร"
+            className="h-12 w-auto object-contain"
+          />
         </div>
         <div className="min-w-0">
           <h1 className="font-heading text-[17px] leading-tight font-bold text-[#0F172A] truncate">
@@ -52,15 +83,6 @@ export default function HospitalHeader({
               : "ใช้พิกัด รพ."}
           </span>
         </button>
-
-        <Link
-          href="/admin/login"
-          title="เข้าสู่ระบบสำหรับเจ้าหน้าที่"
-          className="min-h-[44px] min-w-[44px] rounded-xl border border-slate-200 bg-white hover:bg-slate-50 text-slate-600 hover:text-[#0F766E] flex items-center justify-center transition-colors"
-          aria-label="เข้าสู่ระบบสำหรับเจ้าหน้าที่"
-        >
-          <Lock className="w-4 h-4" />
-        </Link>
       </div>
     </header>
   );

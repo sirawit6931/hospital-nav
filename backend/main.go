@@ -121,6 +121,7 @@ func main() {
 		api.GET("/health", healthCheckHandler)
 		api.GET("/buildings", handlers.SearchBuildings)
 		api.GET("/route", handlers.GetRoute)
+		api.GET("/map-3d-overrides", handlers.GetMap3DOverrides)
 
 		// Public admin authentication
 		api.POST("/admin/login", handlers.AdminLogin)
@@ -148,6 +149,9 @@ func main() {
 
 			// Building Photo Upload
 			admin.POST("/upload", handlers.UploadImage)
+
+			// 3D Model Overrides & Custom Extruded Wings
+			admin.PUT("/map-3d-overrides", handlers.SaveMap3DOverrides)
 		}
 	}
 

@@ -6,19 +6,31 @@ import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useState } from "react";
 import {
   Accessibility,
+  ArrowDown,
+  ArrowLeft,
+  ArrowRight,
+  ArrowUp,
+  Box,
   CheckCircle2,
   Compass,
+  Copy,
+  CopyPlus,
   GitBranch,
-  Hospital,
+  Globe,
+  Link2,
   Loader2,
   LogOut,
   Map as MapIcon,
+  MapPin,
   Plus,
   RefreshCw,
+  RotateCcw,
   Route,
+  Save,
   ShieldAlert,
   ToggleLeft,
   Trash2,
+  Undo2,
   Upload,
   X,
 } from "lucide-react";
@@ -33,7 +45,15 @@ import {
   type UploadResponse,
 } from "@/lib/api";
 import type { AdminEditorMode } from "@/components/maps/AdminMapEditor";
-import type { MapViewMode } from "@/lib/hospital3d";
+import {
+  EMPTY_MAP_3D_OVERRIDES,
+  WALL_MAP_COLOR_PRESETS,
+  type Building3DOverride,
+  type Building3DProps,
+  type Custom3DPart,
+  type Map3DOverridesPayload,
+  type MapViewMode,
+} from "@/lib/hospital3d";
 
 const AdminMapEditor = dynamic(
   () => import("@/components/maps/AdminMapEditor"),
@@ -109,6 +129,32 @@ export default function AdminMapPage() {
   );
   const [isDeleting, setIsDeleting] = useState(false);
 
+  // 3D Building Customizer state (free drag/resize/rotate/nudge, satellite underlay, undo, multi-block & node link)
+  const [overrides3D, setOverrides3D] = useState<Map3DOverridesPayload>(
+    EMPTY_MAP_3D_OVERRIDES
+  );
+  const [selected3D, setSelected3D] = useState<Building3DOverride | null>(null);
+  const [selected3DIsCustom, setSelected3DIsCustom] = useState(false);
+  const [selected3DIsWing, setSelected3DIsWing] = useState(false);
+  const [isSaving3D, setIsSaving3D] = useState(false);
+  const [hasUnsaved3D, setHasUnsaved3D] = useState(false);
+  const [clickToMove3D, setClickToMove3D] = useState(false);
+  const [clickToPlace3D, setClickToPlace3D] = useState(false);
+  const [nudgeStepM, setNudgeStepM] = useState<number>(0.5);
+  const [showSatelliteUnderlay, setShowSatelliteUnderlay] = useState(false);
+  const [buildingOpacity, setBuildingOpacity] = useState<number>(0.92);
+  const [mapViewportCenter, setMapViewportCenter] = useState<[number, number]>([
+    17.1633, 104.1581,
+  ]);
+  const [undoStack, setUndoStack] = useState<
+    {
+      overrides3D: Map3DOverridesPayload;
+      selected3D: Building3DOverride | null;
+      selected3DIsCustom: boolean;
+      selected3DIsWing: boolean;
+    }[]
+  >([]);
+
   // Toast feedback
   const [toast, setToast] = useState<{
     type: "success" | "error";
@@ -125,14 +171,24 @@ export default function AdminMapPage() {
   const loadAllMapData = useCallback(async () => {
     setIsLoadingData(true);
     try {
-      const [nodesRes, edgesRes, surveysRes] = await Promise.all([
+      const [nodesRes, edgesRes, surveysRes, overridesRes] = await Promise.all([
         api.get<MapNode[]>("/api/admin/nodes"),
         api.get<MapEdge[]>("/api/admin/edges"),
         api.get<SurveyTrack[]>("/api/admin/surveys"),
+        api
+          .get<Map3DOverridesPayload>("/api/map-3d-overrides")
+          .catch(() => ({ data: EMPTY_MAP_3D_OVERRIDES })),
       ]);
       setNodes(Array.isArray(nodesRes.data) ? nodesRes.data : []);
       setEdges(Array.isArray(edgesRes.data) ? edgesRes.data : []);
       setSurveys(Array.isArray(surveysRes.data) ? surveysRes.data : []);
+      if (overridesRes.data) {
+        setOverrides3D({
+          overrides: overridesRes.data.overrides || {},
+          custom_parts: overridesRes.data.custom_parts || [],
+        });
+        setHasUnsaved3D(false);
+      }
     } catch (err) {
       showToast("error", extractApiError(err, "ไม่สามารถโหลดข้อมูลแผนที่ได้"));
     } finally {
@@ -158,10 +214,380 @@ export default function AdminMapPage() {
   const handleModeChange = (nextMode: AdminEditorMode) => {
     setMode(nextMode);
     setSelectedSourceNodeId(null);
+    if (nextMode === "customize_3d") {
+      setMapViewMode("3d");
+      setShowSurveys(false);
+    } else {
+      setClickToMove3D(false);
+      setClickToPlace3D(false);
+    }
   };
 
-  // Mode 1: Click empty map -> Open modal to create a new Node
+  const pushUndoSnapshot = useCallback(() => {
+    setUndoStack((prev) => {
+      const cloned: Map3DOverridesPayload = {
+        overrides: JSON.parse(JSON.stringify(overrides3D.overrides || {})),
+        custom_parts: JSON.parse(JSON.stringify(overrides3D.custom_parts || [])),
+      };
+      const next = [
+        ...prev,
+        {
+          overrides3D: cloned,
+          selected3D: selected3D ? { ...selected3D } : null,
+          selected3DIsCustom,
+          selected3DIsWing,
+        },
+      ];
+      return next.length > 30 ? next.slice(next.length - 30) : next;
+    });
+  }, [overrides3D, selected3D, selected3DIsCustom, selected3DIsWing]);
+
+  const handleUndo3D = useCallback(() => {
+    setUndoStack((prev) => {
+      if (prev.length === 0) return prev;
+      const last = prev[prev.length - 1];
+      setOverrides3D(last.overrides3D);
+      setSelected3D(last.selected3D);
+      setSelected3DIsCustom(last.selected3DIsCustom);
+      setSelected3DIsWing(last.selected3DIsWing);
+      setHasUnsaved3D(true);
+      showToast("success", "ย้อนกลับการปรับแต่งล่าสุดแล้ว (Undo)");
+      return prev.slice(0, -1);
+    });
+  }, [showToast]);
+
+  // Support Ctrl+Z shortcut in Mode 6
+  useEffect(() => {
+    if (mode !== "customize_3d") return;
+    const onKeyDown = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "z") {
+        const tag = (e.target as HTMLElement | null)?.tagName;
+        if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return;
+        e.preventDefault();
+        handleUndo3D();
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [mode, handleUndo3D]);
+
+  const handleSelectBuilding3D = useCallback(
+    (b: Building3DProps | null) => {
+      setClickToMove3D(false);
+      setClickToPlace3D(false);
+      if (!b) {
+        setSelected3D(null);
+        return;
+      }
+      const existingCustom = overrides3D.custom_parts.find((p) => p.id === b.id);
+      if (existingCustom) {
+        setSelected3DIsCustom(true);
+        setSelected3DIsWing(existingCustom.is_wing);
+        setSelected3D({
+          id: existingCustom.id,
+          name: existingCustom.name,
+          short_name: existingCustom.short_name,
+          center_lat: existingCustom.center_lat,
+          center_lng: existingCustom.center_lng,
+          width_m: existingCustom.width_m,
+          depth_m: existingCustom.depth_m,
+          angle_deg: existingCustom.angle_deg,
+          height: existingCustom.height,
+          base_height: existingCustom.base_height,
+          color: existingCustom.color,
+          linked_node_id: existingCustom.linked_node_id ?? null,
+        });
+        return;
+      }
+
+      const existingOv = overrides3D.overrides[b.id];
+      setSelected3DIsCustom(false);
+      setSelected3DIsWing(Boolean(b.is_wing));
+      setSelected3D({
+        id: b.id,
+        name: existingOv?.name ?? b.name,
+        short_name: existingOv?.short_name ?? b.short_name,
+        center_lat: existingOv?.center_lat ?? b.center_lat,
+        center_lng: existingOv?.center_lng ?? b.center_lng,
+        width_m: existingOv?.width_m ?? b.width_m ?? 28,
+        depth_m: existingOv?.depth_m ?? b.depth_m ?? 20,
+        angle_deg: existingOv?.angle_deg ?? b.angle_deg ?? -24,
+        height: existingOv?.height ?? b.height ?? 12,
+        base_height: existingOv?.base_height ?? b.base_height ?? 0,
+        color: existingOv?.color ?? b.color ?? "#E2E8F0",
+        linked_node_id: existingOv?.linked_node_id ?? b.linked_node_id ?? null,
+      });
+    },
+    [overrides3D]
+  );
+
+  const updateSelected3DField = useCallback(
+    (
+      patch: Partial<Building3DOverride>,
+      nextIsWing?: boolean,
+      recordUndo = false
+    ) => {
+      if (recordUndo) {
+        pushUndoSnapshot();
+      }
+      setSelected3D((prev) => {
+        if (!prev) return prev;
+        const updated: Building3DOverride = { ...prev, ...patch };
+        setHasUnsaved3D(true);
+        setOverrides3D((curr) => {
+          const idx = curr.custom_parts.findIndex((p) => p.id === updated.id);
+          if (idx >= 0) {
+            const nextParts = [...curr.custom_parts];
+            nextParts[idx] = {
+              ...nextParts[idx],
+              name: updated.name || nextParts[idx].name,
+              short_name: updated.short_name ?? nextParts[idx].short_name,
+              is_wing: nextIsWing ?? nextParts[idx].is_wing,
+              center_lat: updated.center_lat,
+              center_lng: updated.center_lng,
+              width_m: updated.width_m,
+              depth_m: updated.depth_m,
+              angle_deg: updated.angle_deg,
+              height: updated.height,
+              base_height: updated.base_height,
+              color: updated.color,
+              linked_node_id: updated.linked_node_id ?? null,
+            };
+            return { ...curr, custom_parts: nextParts };
+          }
+          return {
+            ...curr,
+            overrides: {
+              ...curr.overrides,
+              [updated.id]: updated,
+            },
+          };
+        });
+        return updated;
+      });
+      if (nextIsWing !== undefined) {
+        setSelected3DIsWing(nextIsWing);
+      }
+    },
+    [pushUndoSnapshot]
+  );
+
+  const nudgeSelected3D = useCallback(
+    (dNorthMeters: number, dEastMeters: number) => {
+      if (!selected3D) return;
+      const cosLat = Math.cos((selected3D.center_lat * Math.PI) / 180);
+      const nextLat = Number(
+        (selected3D.center_lat + dNorthMeters / 111320).toFixed(6)
+      );
+      const nextLng = Number(
+        (selected3D.center_lng + dEastMeters / (111320 * cosLat)).toFixed(6)
+      );
+      updateSelected3DField({ center_lat: nextLat, center_lng: nextLng }, undefined, true);
+    },
+    [selected3D, updateSelected3DField]
+  );
+
+  const handleAddBlock3D = useCallback(
+    (asWing = false, customLat?: number, customLng?: number) => {
+      pushUndoSnapshot();
+      const baseLat =
+        customLat ??
+        (asWing && selected3D
+          ? selected3D.center_lat + 0.0001
+          : mapViewportCenter[0]);
+      const baseLng =
+        customLng ??
+        (asWing && selected3D
+          ? selected3D.center_lng + 0.0001
+          : mapViewportCenter[1]);
+      const newPart: Custom3DPart = {
+        id: `custom-3d-${Date.now()}`,
+        parent_id: asWing && selected3D ? selected3D.id : undefined,
+        name: asWing
+          ? `ส่วนยื่น ${selected3D?.short_name || selected3D?.name || "อาคาร"}`
+          : "บล็อกอาคาร 3D ใหม่",
+        short_name: asWing ? "" : "อาคารใหม่",
+        is_wing: asWing,
+        center_lat: Number(baseLat.toFixed(6)),
+        center_lng: Number(baseLng.toFixed(6)),
+        width_m: asWing ? 18 : 24,
+        depth_m: asWing ? 12 : 18,
+        angle_deg: selected3D?.angle_deg ?? -24,
+        height: asWing
+          ? Math.max(8, Math.round((selected3D?.height ?? 16) * 0.65))
+          : 14,
+        base_height: 0,
+        color: selected3D?.color ?? "#EAB308",
+        linked_node_id: asWing ? selected3D?.linked_node_id ?? null : null,
+      };
+      setOverrides3D((curr) => ({
+        ...curr,
+        custom_parts: [...curr.custom_parts, newPart],
+      }));
+      setSelected3DIsCustom(true);
+      setSelected3DIsWing(newPart.is_wing);
+      setSelected3D({
+        id: newPart.id,
+        name: newPart.name,
+        short_name: newPart.short_name,
+        center_lat: newPart.center_lat,
+        center_lng: newPart.center_lng,
+        width_m: newPart.width_m,
+        depth_m: newPart.depth_m,
+        angle_deg: newPart.angle_deg,
+        height: newPart.height,
+        base_height: newPart.base_height,
+        color: newPart.color,
+        linked_node_id: newPart.linked_node_id ?? null,
+      });
+      setHasUnsaved3D(true);
+      showToast(
+        "success",
+        asWing
+          ? "เพิ่มปีกยื่น 3D แล้ว ลากจุดจับเพื่อจัดวางได้เลย"
+          : "เพิ่มบล็อก 3D ใหม่แล้ว ลากย้าย/ยืด-หดบนแผนที่ได้ทันที"
+      );
+    },
+    [selected3D, mapViewportCenter, pushUndoSnapshot, showToast]
+  );
+
+  const handleDuplicateSelected3D = useCallback(() => {
+    if (!selected3D) return;
+    pushUndoSnapshot();
+    const cosLat = Math.cos((selected3D.center_lat * Math.PI) / 180);
+    const rad = (selected3D.angle_deg * Math.PI) / 180;
+    const shiftM = Math.min(18, Math.max(8, selected3D.width_m * 0.45));
+    const dx = Math.cos(rad) * shiftM;
+    const dy = Math.sin(rad) * shiftM;
+    const nextLat = Number((selected3D.center_lat + dy / 111320).toFixed(6));
+    const nextLng = Number(
+      (selected3D.center_lng + dx / (111320 * cosLat)).toFixed(6)
+    );
+
+    const dupPart: Custom3DPart = {
+      id: `custom-3d-${Date.now()}`,
+      parent_id: selected3D.id,
+      name: `${selected3D.name || selected3D.short_name || "บล็อก"} (คัดลอก)`,
+      short_name: "",
+      is_wing: true,
+      center_lat: nextLat,
+      center_lng: nextLng,
+      width_m: selected3D.width_m,
+      depth_m: selected3D.depth_m,
+      angle_deg: selected3D.angle_deg,
+      height: selected3D.height,
+      base_height: selected3D.base_height,
+      color: selected3D.color,
+      linked_node_id: selected3D.linked_node_id ?? null,
+    };
+
+    setOverrides3D((curr) => ({
+      ...curr,
+      custom_parts: [...curr.custom_parts, dupPart],
+    }));
+    setSelected3DIsCustom(true);
+    setSelected3DIsWing(true);
+    setSelected3D({
+      id: dupPart.id,
+      name: dupPart.name,
+      short_name: dupPart.short_name,
+      center_lat: dupPart.center_lat,
+      center_lng: dupPart.center_lng,
+      width_m: dupPart.width_m,
+      depth_m: dupPart.depth_m,
+      angle_deg: dupPart.angle_deg,
+      height: dupPart.height,
+      base_height: dupPart.base_height,
+      color: dupPart.color,
+      linked_node_id: dupPart.linked_node_id ?? null,
+    });
+    setHasUnsaved3D(true);
+    showToast("success", "คัดลอกบล็อก 3D เรียบร้อยแล้ว ลากต่อเป็นตึก L/U ได้เลย");
+  }, [selected3D, pushUndoSnapshot, showToast]);
+
+  const handleDeleteSelected3D = useCallback(() => {
+    if (!selected3D) return;
+    pushUndoSnapshot();
+    if (selected3DIsCustom) {
+      setOverrides3D((curr) => ({
+        ...curr,
+        custom_parts: curr.custom_parts.filter((p) => p.id !== selected3D.id),
+      }));
+      setSelected3D(null);
+      setHasUnsaved3D(true);
+      showToast("success", "ลบบล็อก 3D ที่สร้างเองแล้ว (กดบันทึก 3D เพื่อยืนยัน)");
+      return;
+    }
+    setOverrides3D((curr) => ({
+      ...curr,
+      overrides: {
+        ...curr.overrides,
+        [selected3D.id]: { ...selected3D, hidden: true },
+      },
+    }));
+    setSelected3D(null);
+    setHasUnsaved3D(true);
+    showToast("success", "ลบบล็อกนี้ออกจากแผนที่ 3D แล้ว (กดบันทึก 3D หรือ Undo ได้)");
+  }, [selected3D, selected3DIsCustom, pushUndoSnapshot, showToast]);
+
+  const handleResetSelected3D = useCallback(() => {
+    if (!selected3D || selected3DIsCustom) return;
+    pushUndoSnapshot();
+    setOverrides3D((curr) => {
+      const nextOv = { ...curr.overrides };
+      delete nextOv[selected3D.id];
+      return { ...curr, overrides: nextOv };
+    });
+    setSelected3D(null);
+    setHasUnsaved3D(true);
+    showToast("success", "รีเซ็ตทรงตึกกลับค่าตั้งต้นแล้ว (กดบันทึก 3D เพื่อยืนยัน)");
+  }, [selected3D, selected3DIsCustom, pushUndoSnapshot, showToast]);
+
+  const handleSave3DOverrides = useCallback(async () => {
+    setIsSaving3D(true);
+    try {
+      const res = await api.put<Map3DOverridesPayload>(
+        "/api/admin/map-3d-overrides",
+        overrides3D
+      );
+      setOverrides3D({
+        overrides: res.data.overrides || {},
+        custom_parts: res.data.custom_parts || [],
+      });
+      setHasUnsaved3D(false);
+      showToast(
+        "success",
+        "บันทึกการปรับแต่งโมเดล 3D เรียบร้อยแล้ว (แสดงผลตรงกันทั้งหน้า Admin และหน้าผู้ใช้)"
+      );
+    } catch (err) {
+      showToast("error", extractApiError(err, "ไม่สามารถบันทึกโมเดล 3D ได้"));
+    } finally {
+      setIsSaving3D(false);
+    }
+  }, [overrides3D, showToast]);
+
+  // Mode 1: Click empty map -> Open modal to create a new Node, OR place/move 3D model in customize_3d mode
   const handleMapClick = (lat: number, lng: number) => {
+    if (mode === "customize_3d") {
+      if (clickToPlace3D) {
+        setClickToPlace3D(false);
+        handleAddBlock3D(false, lat, lng);
+        return;
+      }
+      if (clickToMove3D && selected3D) {
+        updateSelected3DField(
+          {
+            center_lat: Number(lat.toFixed(6)),
+            center_lng: Number(lng.toFixed(6)),
+          },
+          undefined,
+          true
+        );
+        setClickToMove3D(false);
+        showToast("success", "ย้ายตำแหน่งโมเดล 3D ไปยังจุดที่คลิกแล้ว");
+      }
+      return;
+    }
     if (mode !== "add_node") return;
     setNodeModal({
       id: null,
@@ -383,6 +809,11 @@ export default function AdminMapPage() {
     toggle_edge:
       "คลิกที่เส้นทางใดก็ได้เพื่อสลับสถานะ เปิดใช้งาน / ปิดปรับปรุงชั่วคราว (เส้นประสีแดง)",
     delete: "คลิกที่จุด (Node) หรือเส้นเชื่อม (Edge) ที่ต้องการลบออกจากแผนที่",
+    customize_3d: clickToPlace3D
+      ? "คลิกตำแหน่งใดก็ได้บนแผนที่ 3D เพื่อวางบล็อก 3D ใหม่ตรงจุดนั้น"
+      : clickToMove3D
+      ? "คลิกตำแหน่งใหม่บนแผนที่ 3D เพื่อย้ายบล็อกที่เลือกไปวางตรงจุดนั้น"
+      : "คลิกเลือกบล็อก 3D แล้วลากจุดสีฟ้า (ย้าย), จุดสี่เหลี่ยมขอบข้าง (ยืด-หด), หรือจุดสีเขียว (หมุน) ได้อิสระบนแผนที่",
   };
 
   return (
@@ -390,8 +821,13 @@ export default function AdminMapPage() {
       {/* Top Admin Header */}
       <header className="shrink-0 bg-white border-b border-slate-200 px-4 py-2.5 flex flex-wrap items-center justify-between gap-3">
         <div className="flex items-center gap-3">
-          <div className="w-10 h-10 rounded-xl bg-[#0F766E] text-white flex items-center justify-center shrink-0">
-            <Hospital className="w-5 h-5" />
+          <div className="h-11 w-auto flex items-center justify-center shrink-0">
+            {/* eslint-disable-next-line @next/next/no-img-element */}
+            <img
+              src="/sakon-hospital-logo.png"
+              alt="โลโก้โรงพยาบาลสกลนคร"
+              className="h-11 w-auto object-contain"
+            />
           </div>
           <div>
             <h1 className="font-heading text-base font-bold text-[#0F172A] leading-tight">
@@ -514,6 +950,21 @@ export default function AdminMapPage() {
               5. แสดง Survey Tracks ({surveys.length})
             </span>
           </button>
+
+          <button
+            type="button"
+            onClick={() => handleModeChange("customize_3d")}
+            className={`min-h-[44px] px-3.5 rounded-xl text-xs sm:text-sm font-bold inline-flex items-center gap-2 border transition-colors cursor-pointer ${
+              mode === "customize_3d"
+                ? "bg-sky-600 border-sky-600 text-white shadow-sm"
+                : "bg-white border-slate-200 text-slate-700 hover:border-sky-300"
+            }`}
+          >
+            <Box className="w-4 h-4" />
+            <span>
+              6. ปรับแต่ง/ยื่นโมเดล 3D{hasUnsaved3D ? " *" : ""}
+            </span>
+          </button>
         </div>
 
         {/* Context-sensitive toolbar hint + edge metadata inputs when in connect_edge mode */}
@@ -557,6 +1008,15 @@ export default function AdminMapPage() {
               surveys={surveys}
               showSurveys={showSurveys}
               selectedSourceNodeId={selectedSourceNodeId}
+              overrides3D={overrides3D}
+              selectedBuilding3DId={selected3D?.id ?? null}
+              selected3D={selected3D}
+              showSatelliteUnderlay={showSatelliteUnderlay}
+              buildingOpacity={buildingOpacity}
+              onSelectBuilding3D={handleSelectBuilding3D}
+              onBeginTransform3D={pushUndoSnapshot}
+              onLiveTransform3D={(patch) => updateSelected3DField(patch)}
+              onMapCenterChange={(lat, lng) => setMapViewportCenter([lat, lng])}
               onMapClick={handleMapClick}
               onNodeClick={handleNodeClick}
               onEdgeClick={handleEdgeClick}
@@ -577,6 +1037,509 @@ export default function AdminMapPage() {
             />
           )}
         </div>
+
+        {/* Collapsible 3D Building Customizer Panel when Mode 6 is active */}
+        {mode === "customize_3d" && (
+          <aside className="w-80 sm:w-96 shrink-0 bg-white border-l border-slate-200 flex flex-col overflow-hidden">
+            <div className="px-4 py-3 border-b border-slate-200 flex items-center justify-between gap-2 bg-slate-50">
+              <div className="flex items-center gap-2 min-w-0">
+                <Box className="w-4 h-4 text-sky-600 shrink-0" />
+                <h2 className="font-heading text-sm font-bold text-[#0F172A] truncate">
+                  ปรับแต่ง / ยื่นโมเดล 3D
+                </h2>
+              </div>
+              <div className="flex items-center gap-1.5 shrink-0">
+                <button
+                  type="button"
+                  onClick={handleUndo3D}
+                  disabled={undoStack.length === 0}
+                  title="เลิกทำ (Undo / Ctrl+Z)"
+                  className="min-h-[36px] px-2.5 rounded-lg border border-slate-200 bg-white hover:bg-slate-100 disabled:opacity-40 text-slate-700 text-xs font-bold inline-flex items-center gap-1 cursor-pointer"
+                >
+                  <Undo2 className="w-3.5 h-3.5" />
+                  <span>เลิกทำ</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={handleSave3DOverrides}
+                  disabled={isSaving3D}
+                  className="min-h-[36px] px-3 rounded-lg bg-[#0F766E] hover:bg-[#115E59] disabled:opacity-60 text-white text-xs font-bold inline-flex items-center gap-1.5 cursor-pointer"
+                >
+                  {isSaving3D ? (
+                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                  ) : (
+                    <Save className="w-3.5 h-3.5" />
+                  )}
+                  <span>บันทึก 3D</span>
+                </button>
+              </div>
+            </div>
+
+            <div className="flex-1 overflow-y-auto p-4 space-y-4">
+              {/* Rooftop Alignment Helper: Satellite Underlay Toggle + 3D Block Opacity */}
+              <div className="rounded-xl border border-slate-200 bg-slate-50 p-3 space-y-2.5">
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-xs font-bold text-slate-700">
+                    ตัวช่วยจัดวางให้ตรงพื้นที่จริง
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() =>
+                      setShowSatelliteUnderlay((prev) => {
+                        const next = !prev;
+                        if (next && buildingOpacity > 0.75) {
+                          setBuildingOpacity(0.55);
+                        } else if (!next && buildingOpacity < 0.75) {
+                          setBuildingOpacity(0.92);
+                        }
+                        return next;
+                      })
+                    }
+                    className={`min-h-[32px] px-2.5 rounded-lg border text-xs font-bold inline-flex items-center gap-1.5 transition-colors cursor-pointer ${
+                      showSatelliteUnderlay
+                        ? "bg-[#0F766E] border-[#0F766E] text-white"
+                        : "bg-white border-slate-200 text-slate-700 hover:bg-teal-50"
+                    }`}
+                  >
+                    <Globe className="w-3.5 h-3.5" />
+                    <span>พื้นหลังดาวเทียม</span>
+                  </button>
+                </div>
+
+                <div className="space-y-1">
+                  <div className="flex items-center justify-between text-[11px] font-semibold text-slate-600">
+                    <span>ความทึบแสงบล็อก 3D (สำหรับทาบหลังคา)</span>
+                    <span className="tabular-nums font-bold text-slate-800">
+                      {Math.round(buildingOpacity * 100)}%
+                    </span>
+                  </div>
+                  <input
+                    type="range"
+                    min={20}
+                    max={100}
+                    step={5}
+                    value={Math.round(buildingOpacity * 100)}
+                    onChange={(e) =>
+                      setBuildingOpacity(Number(e.target.value) / 100)
+                    }
+                    className="w-full accent-[#0F766E] cursor-pointer"
+                  />
+                </div>
+              </div>
+
+              {/* Add / Click-to-Place / Add Wing Controls */}
+              <div className="grid grid-cols-2 gap-2">
+                <button
+                  type="button"
+                  onClick={() => handleAddBlock3D(false)}
+                  className="min-h-[38px] px-2.5 rounded-xl border border-teal-200 bg-teal-50 hover:bg-teal-100 text-[#0F766E] text-xs font-bold inline-flex items-center justify-center gap-1.5 cursor-pointer"
+                >
+                  <Plus className="w-4 h-4 shrink-0" />
+                  <span>เพิ่มบล็อก 3D ใหม่</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setClickToMove3D(false);
+                    setClickToPlace3D((prev) => !prev);
+                  }}
+                  className={`min-h-[38px] px-2.5 rounded-xl border text-xs font-bold inline-flex items-center justify-center gap-1.5 cursor-pointer ${
+                    clickToPlace3D
+                      ? "bg-amber-500 border-amber-600 text-white"
+                      : "border-sky-200 bg-sky-50 hover:bg-sky-100 text-sky-800"
+                  }`}
+                >
+                  <MapPin className="w-3.5 h-3.5 shrink-0" />
+                  <span>{clickToPlace3D ? "คลิกจุดวางบนแมพ..." : "คลิกวางบนแผนที่"}</span>
+                </button>
+              </div>
+
+              {!selected3D ? (
+                <div className="rounded-2xl border border-dashed border-slate-300 bg-slate-50 p-5 text-center space-y-2">
+                  <Box className="w-8 h-8 text-slate-400 mx-auto" />
+                  <p className="text-sm font-bold text-slate-700">
+                    คลิกเลือกบล็อกบนแผนที่ 3D
+                  </p>
+                  <p className="text-xs text-slate-500 leading-relaxed">
+                    คลิกเลือกอาคารใดก็ได้เพื่อแสดงจุดจับลากย้าย (สีฟ้า), จุดยืด-หด 4 ด้าน, จุดหมุน (สีเขียว) หรือคัดลอกต่อเป็นตึกรูปตัว L/U และทางเชื่อมลอยฟ้า
+                  </p>
+                </div>
+              ) : (
+                <div className="space-y-4">
+                  {/* Selected Building Title, Wing Checkbox, Duplicate & Skybridge Quick Actions */}
+                  <div className="rounded-xl bg-sky-50/70 border border-sky-200 p-3 space-y-2.5">
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="text-[11px] font-bold uppercase tracking-wide text-sky-700">
+                        {selected3DIsCustom
+                          ? "บล็อก 3D ที่สร้างเอง"
+                          : "บล็อก 3D ที่เลือก"}
+                      </span>
+                      <span className="text-[11px] font-mono text-slate-500 truncate max-w-[140px]">
+                        {selected3D.id}
+                      </span>
+                    </div>
+
+                    <input
+                      type="text"
+                      value={selected3D.short_name ?? ""}
+                      onChange={(e) =>
+                        updateSelected3DField({
+                          short_name: e.target.value,
+                          name: e.target.value || selected3D.name,
+                        })
+                      }
+                      placeholder="ชื่อป้ายบนแผนที่ (เว้นว่างถ้าเป็นปีกยื่น)"
+                      className="w-full min-h-[38px] px-3 rounded-lg bg-white border border-slate-200 text-xs font-semibold text-[#0F172A] focus:outline-none focus:border-sky-500"
+                    />
+
+                    {/* Bind to existing Building Node ID */}
+                    <div className="space-y-1">
+                      <label
+                        htmlFor="link-node-select"
+                        className="flex items-center gap-1 text-[11px] font-bold text-slate-600"
+                      >
+                        <Link2 className="w-3.5 h-3.5 text-[#0F766E]" />
+                        <span>ผูกกับอาคารในระบบนำทาง (node_id)</span>
+                      </label>
+                      <select
+                        id="link-node-select"
+                        value={
+                          selected3D.linked_node_id
+                            ? String(selected3D.linked_node_id)
+                            : ""
+                        }
+                        onChange={(e) => {
+                          const val = e.target.value
+                            ? Number(e.target.value)
+                            : null;
+                          updateSelected3DField(
+                            { linked_node_id: val },
+                            undefined,
+                            true
+                          );
+                        }}
+                        className="w-full min-h-[36px] px-2.5 rounded-lg bg-white border border-slate-200 text-xs font-semibold text-slate-700 focus:outline-none focus:border-sky-500"
+                      >
+                        <option value="">-- จับคู่อัตโนมัติตามพิกัด --</option>
+                        {nodes
+                          .filter((n) => n.is_building)
+                          .map((b) => (
+                            <option key={`link-bldg-${b.id}`} value={String(b.id)}>
+                              #{b.id} {b.name}
+                            </option>
+                          ))}
+                      </select>
+                    </div>
+
+                    {selected3DIsCustom && (
+                      <label className="inline-flex items-center gap-2 text-xs font-semibold text-slate-700 cursor-pointer">
+                        <input
+                          type="checkbox"
+                          checked={selected3DIsWing}
+                          onChange={(e) =>
+                            updateSelected3DField({}, e.target.checked, true)
+                          }
+                          className="w-4 h-4 accent-sky-600"
+                        />
+                        <span>เป็นส่วนยื่นของอาคาร (ไม่แสดงป้ายชื่อซ้ำ)</span>
+                      </label>
+                    )}
+
+                    {/* Quick Duplicate / Add Wing / Skybridge */}
+                    <div className="grid grid-cols-3 gap-1.5 pt-1">
+                      <button
+                        type="button"
+                        onClick={handleDuplicateSelected3D}
+                        className="min-h-[34px] px-2 rounded-lg bg-white border border-sky-200 hover:bg-sky-100 text-sky-800 text-[11px] font-bold inline-flex items-center justify-center gap-1 cursor-pointer"
+                      >
+                        <Copy className="w-3.5 h-3.5 shrink-0" />
+                        <span>คัดลอก</span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => handleAddBlock3D(true)}
+                        className="min-h-[34px] px-2 rounded-lg bg-white border border-sky-200 hover:bg-sky-100 text-sky-800 text-[11px] font-bold inline-flex items-center justify-center gap-1 cursor-pointer"
+                      >
+                        <CopyPlus className="w-3.5 h-3.5 shrink-0" />
+                        <span>เพิ่มปีกยื่น</span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() =>
+                          updateSelected3DField(
+                            { base_height: 4, height: 8 },
+                            undefined,
+                            true
+                          )
+                        }
+                        title="ตั้งค่าระดับฐานยกลอยจากพื้น 4 ม. สำหรับทำทางเชื่อมลอยฟ้า"
+                        className="min-h-[34px] px-2 rounded-lg bg-white border border-amber-200 hover:bg-amber-50 text-amber-800 text-[11px] font-bold inline-flex items-center justify-center cursor-pointer"
+                      >
+                        <span>ทางเชื่อมลอยฟ้า</span>
+                      </button>
+                    </div>
+                  </div>
+
+                  {/* Width (Stretch X) */}
+                  <div className="space-y-1">
+                    <div className="flex items-center justify-between text-xs font-bold text-slate-700">
+                      <span>ความกว้าง (ยืด-หดซ้ายขวา)</span>
+                      <span className="tabular-nums text-sky-700">
+                        {selected3D.width_m} ม.
+                      </span>
+                    </div>
+                    <input
+                      type="range"
+                      min={3}
+                      max={160}
+                      step={0.5}
+                      value={selected3D.width_m}
+                      onPointerDown={pushUndoSnapshot}
+                      onChange={(e) =>
+                        updateSelected3DField({ width_m: Number(e.target.value) })
+                      }
+                      className="w-full accent-sky-600 cursor-pointer"
+                    />
+                  </div>
+
+                  {/* Depth (Stretch Y / Extrude Wing) */}
+                  <div className="space-y-1">
+                    <div className="flex items-center justify-between text-xs font-bold text-slate-700">
+                      <span>ความยาว / ลึก (ยื่นหน้า-หลัง)</span>
+                      <span className="tabular-nums text-sky-700">
+                        {selected3D.depth_m} ม.
+                      </span>
+                    </div>
+                    <input
+                      type="range"
+                      min={3}
+                      max={160}
+                      step={0.5}
+                      value={selected3D.depth_m}
+                      onPointerDown={pushUndoSnapshot}
+                      onChange={(e) =>
+                        updateSelected3DField({ depth_m: Number(e.target.value) })
+                      }
+                      className="w-full accent-sky-600 cursor-pointer"
+                    />
+                  </div>
+
+                  {/* Height & Base Height */}
+                  <div className="grid grid-cols-2 gap-3">
+                    <div className="space-y-1">
+                      <div className="flex items-center justify-between text-xs font-bold text-slate-700">
+                        <span>ความสูง</span>
+                        <span className="tabular-nums text-sky-700">
+                          {Math.round(selected3D.height)} ม.
+                        </span>
+                      </div>
+                      <input
+                        type="range"
+                        min={3}
+                        max={60}
+                        step={1}
+                        value={Math.round(selected3D.height)}
+                        onPointerDown={pushUndoSnapshot}
+                        onChange={(e) =>
+                          updateSelected3DField({ height: Number(e.target.value) })
+                        }
+                        className="w-full accent-sky-600 cursor-pointer"
+                      />
+                    </div>
+                    <div className="space-y-1">
+                      <div className="flex items-center justify-between text-xs font-bold text-slate-700">
+                        <span>ระดับฐาน</span>
+                        <span className="tabular-nums text-sky-700">
+                          {Math.round(selected3D.base_height)} ม.
+                        </span>
+                      </div>
+                      <input
+                        type="range"
+                        min={0}
+                        max={45}
+                        step={1}
+                        value={Math.round(selected3D.base_height)}
+                        onPointerDown={pushUndoSnapshot}
+                        onChange={(e) =>
+                          updateSelected3DField({
+                            base_height: Number(e.target.value),
+                          })
+                        }
+                        className="w-full accent-sky-600 cursor-pointer"
+                      />
+                    </div>
+                  </div>
+
+                  {/* Rotation Angle */}
+                  <div className="space-y-1">
+                    <div className="flex items-center justify-between text-xs font-bold text-slate-700">
+                      <span>มุมหมุนอาคาร</span>
+                      <span className="tabular-nums text-sky-700">
+                        {Math.round(selected3D.angle_deg)}°
+                      </span>
+                    </div>
+                    <input
+                      type="range"
+                      min={-180}
+                      max={180}
+                      step={1}
+                      value={Math.round(selected3D.angle_deg)}
+                      onPointerDown={pushUndoSnapshot}
+                      onChange={(e) =>
+                        updateSelected3DField({ angle_deg: Number(e.target.value) })
+                      }
+                      className="w-full accent-sky-600 cursor-pointer"
+                    />
+                  </div>
+
+                  {/* Fine Position Nudge (0.5m / 1m / 2m) & Click-to-Move */}
+                  <div className="space-y-2">
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="text-xs font-bold text-slate-700">
+                        ขยับตำแหน่งละเอียด
+                      </span>
+                      <div className="inline-flex rounded-lg bg-slate-100 p-0.5">
+                        {[0.5, 1, 2].map((step) => (
+                          <button
+                            key={`nudge-${step}`}
+                            type="button"
+                            onClick={() => setNudgeStepM(step)}
+                            className={`px-2 py-0.5 rounded-md text-[11px] font-bold cursor-pointer ${
+                              nudgeStepM === step
+                                ? "bg-sky-600 text-white"
+                                : "text-slate-600 hover:bg-white"
+                            }`}
+                          >
+                            {step} ม.
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                    <div className="grid grid-cols-4 gap-1.5">
+                      <button
+                        type="button"
+                        onClick={() => nudgeSelected3D(nudgeStepM, 0)}
+                        className="min-h-[36px] rounded-lg border border-slate-200 hover:bg-slate-100 text-slate-700 flex items-center justify-center cursor-pointer"
+                        title={`เลื่อนขึ้นเหนือ ${nudgeStepM} ม.`}
+                      >
+                        <ArrowUp className="w-4 h-4" />
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => nudgeSelected3D(-nudgeStepM, 0)}
+                        className="min-h-[36px] rounded-lg border border-slate-200 hover:bg-slate-100 text-slate-700 flex items-center justify-center cursor-pointer"
+                        title={`เลื่อนลงใต้ ${nudgeStepM} ม.`}
+                      >
+                        <ArrowDown className="w-4 h-4" />
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => nudgeSelected3D(0, -nudgeStepM)}
+                        className="min-h-[36px] rounded-lg border border-slate-200 hover:bg-slate-100 text-slate-700 flex items-center justify-center cursor-pointer"
+                        title={`เลื่อนซ้ายตะวันตก ${nudgeStepM} ม.`}
+                      >
+                        <ArrowLeft className="w-4 h-4" />
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => nudgeSelected3D(0, nudgeStepM)}
+                        className="min-h-[36px] rounded-lg border border-slate-200 hover:bg-slate-100 text-slate-700 flex items-center justify-center cursor-pointer"
+                        title={`เลื่อนขวาตะวันออก ${nudgeStepM} ม.`}
+                      >
+                        <ArrowRight className="w-4 h-4" />
+                      </button>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setClickToPlace3D(false);
+                        setClickToMove3D((prev) => !prev);
+                      }}
+                      className={`w-full min-h-[34px] px-2.5 rounded-lg text-xs font-bold border cursor-pointer ${
+                        clickToMove3D
+                          ? "bg-amber-500 border-amber-600 text-white"
+                          : "bg-white border-slate-200 text-slate-700 hover:bg-slate-50"
+                      }`}
+                    >
+                      {clickToMove3D
+                        ? "คลิกบนแผนที่เพื่อย้ายมาวางจุดนั้น..."
+                        : "คลิกบนแผนที่เพื่อย้ายจุดกึ่งกลาง"}
+                    </button>
+                  </div>
+
+                  {/* Wall Map Color Presets + Color Picker */}
+                  <div className="space-y-2">
+                    <div className="flex items-center justify-between text-xs font-bold text-slate-700">
+                      <span>สีบล็อก (โทนสีแผนผัง รพ.)</span>
+                      <input
+                        type="color"
+                        value={selected3D.color || "#E2E8F0"}
+                        onClick={pushUndoSnapshot}
+                        onChange={(e) =>
+                          updateSelected3DField({ color: e.target.value })
+                        }
+                        className="w-7 h-6 rounded border border-slate-200 cursor-pointer"
+                        aria-label="เลือกสีบล็อกอิสระ"
+                      />
+                    </div>
+                    <div className="grid grid-cols-6 gap-1.5">
+                      {WALL_MAP_COLOR_PRESETS.map((preset) => (
+                        <button
+                          key={preset.color}
+                          type="button"
+                          onClick={() =>
+                            updateSelected3DField(
+                              { color: preset.color },
+                              undefined,
+                              true
+                            )
+                          }
+                          title={preset.label}
+                          className={`h-7 rounded-lg border-2 cursor-pointer transition-transform ${
+                            selected3D.color?.toLowerCase() ===
+                            preset.color.toLowerCase()
+                              ? "border-sky-600 scale-105"
+                              : "border-slate-200 hover:scale-105"
+                          }`}
+                          style={{ backgroundColor: preset.color }}
+                        />
+                      ))}
+                    </div>
+                  </div>
+
+                  {/* Delete / Reset Selected Building */}
+                  <div className="pt-2 border-t border-slate-200 flex flex-wrap items-center justify-between gap-2">
+                    <button
+                      type="button"
+                      onClick={handleDeleteSelected3D}
+                      className="min-h-[38px] px-3 rounded-xl border border-rose-200 bg-rose-50 hover:bg-rose-100 text-xs font-bold text-[#BE123C] inline-flex items-center gap-1.5 cursor-pointer"
+                    >
+                      <Trash2 className="w-3.5 h-3.5" />
+                      <span>ลบบล็อกนี้</span>
+                    </button>
+                    {!selected3DIsCustom && (
+                      <button
+                        type="button"
+                        onClick={handleResetSelected3D}
+                        className="min-h-[38px] px-3 rounded-xl border border-slate-200 hover:bg-slate-100 text-xs font-bold text-slate-700 inline-flex items-center gap-1.5 cursor-pointer"
+                      >
+                        <RotateCcw className="w-3.5 h-3.5" />
+                        <span>รีเซ็ตตึกนี้</span>
+                      </button>
+                    )}
+                    <button
+                      type="button"
+                      onClick={() => setSelected3D(null)}
+                      className="min-h-[38px] px-2.5 rounded-xl border border-slate-200 hover:bg-slate-100 text-xs font-semibold text-slate-600 cursor-pointer"
+                    >
+                      ปิด
+                    </button>
+                  </div>
+                </div>
+              )}
+            </div>
+          </aside>
+        )}
 
         {/* Collapsible Survey Tracks Panel when Mode 5 is active */}
         {showSurveys && (

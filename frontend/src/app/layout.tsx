@@ -22,8 +22,8 @@ export const metadata: Metadata = {
     "ระบบค้นหาอาคาร แผนกบริการ และนำทางเส้นทางเดินภายในโรงพยาบาลสกลนคร",
   manifest: "/manifest.json",
   icons: {
-    icon: "/icon.svg",
-    apple: "/icon.svg",
+    icon: "/sakon-hospital-logo.png",
+    apple: "/sakon-hospital-logo.png",
   },
 };
 

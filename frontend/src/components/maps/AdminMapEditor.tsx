@@ -27,7 +27,8 @@ export type AdminEditorMode =
   | "add_node"
   | "connect_edge"
   | "toggle_edge"
-  | "delete";
+  | "delete"
+  | "customize_3d";
 
 interface AdminMapEditorProps {
   mapViewMode: MapViewMode;

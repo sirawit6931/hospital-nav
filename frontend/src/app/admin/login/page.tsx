@@ -7,7 +7,6 @@ import {
   ArrowLeft,
   Eye,
   EyeOff,
-  Hospital,
   Loader2,
   Lock,
   ShieldAlert,
@@ -74,8 +73,13 @@ export default function AdminLoginPage() {
         <div className="rounded-3xl bg-white border border-slate-200 shadow-[0_8px_30px_rgba(15,23,42,0.06)] p-6 sm:p-8 space-y-6">
           {/* Official Hospital Emblem */}
           <div className="text-center space-y-3">
-            <div className="w-16 h-16 rounded-2xl bg-[#0F766E] text-white mx-auto flex items-center justify-center shadow-md">
-              <Hospital className="w-8 h-8" strokeWidth={2.2} />
+            <div className="h-20 mx-auto flex items-center justify-center">
+              {/* eslint-disable-next-line @next/next/no-img-element */}
+              <img
+                src="/sakon-hospital-logo.png"
+                alt="โลโก้โรงพยาบาลสกลนคร"
+                className="h-20 w-auto object-contain"
+              />
             </div>
             <div>
               <h1 className="font-heading text-xl font-bold text-[#0F172A]">

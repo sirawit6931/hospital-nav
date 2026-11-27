@@ -316,6 +316,98 @@ export function calculateBearing(
 }
 
 /**
+ * Computes true-North clockwise compass heading (0 = North, 90 = East, 180 = South, 270 = West)
+ * from a DeviceOrientationEvent with tilt compensation:
+ * - iOS Safari: uses `webkitCompassHeading` (already tilt-compensated true North).
+ * - Android Chrome: strictly requires `ev.absolute === true` (from `deviceorientationabsolute`)
+ *   so non-absolute relative orientation events never corrupt true North, and applies W3C Z-X'-Y''
+ *   tilt compensation + screen orientation angle.
+ */
+export function computeCompassHeadingFromOrientation(
+  ev: DeviceOrientationEvent
+): number | null {
+  const webkitHeading = (
+    ev as DeviceOrientationEvent & { webkitCompassHeading?: number }
+  ).webkitCompassHeading;
+
+  if (
+    typeof webkitHeading === "number" &&
+    !Number.isNaN(webkitHeading) &&
+    webkitHeading >= 0
+  ) {
+    return ((webkitHeading % 360) + 360) % 360;
+  }
+
+  // Strictly require absolute orientation so relative gyro alpha doesn't point randomly
+  if (!ev.absolute || typeof ev.alpha !== "number" || Number.isNaN(ev.alpha)) {
+    return null;
+  }
+
+  const degToRad = Math.PI / 180;
+  const alpha = ev.alpha * degToRad;
+  const beta = (typeof ev.beta === "number" && !Number.isNaN(ev.beta) ? ev.beta : 0) * degToRad;
+  const gamma = (typeof ev.gamma === "number" && !Number.isNaN(ev.gamma) ? ev.gamma : 0) * degToRad;
+
+  const cA = Math.cos(alpha);
+  const sA = Math.sin(alpha);
+  const cB = Math.cos(beta);
+  const sB = Math.sin(beta);
+  const cG = Math.cos(gamma);
+  const sG = Math.sin(gamma);
+
+  // Use device top edge (+Y) when held flat or tilted up naturally (|beta| <= 70 deg),
+  // which is immune to hand roll (gamma). Switch to back camera (-Z) when held nearly vertical.
+  let vxEast: number;
+  let vyNorth: number;
+  if (Math.abs(ev.beta ?? 0) > 70) {
+    vxEast = -cA * sG - sA * sB * cG;
+    vyNorth = -sA * sG + cA * sB * cG;
+  } else {
+    vxEast = -sA * cB;
+    vyNorth = cA * cB;
+  }
+
+  if (Math.hypot(vxEast, vyNorth) < 1e-4) {
+    return null;
+  }
+
+  let heading = (Math.atan2(vxEast, vyNorth) * 180) / Math.PI;
+  const screenAngle =
+    typeof window !== "undefined" &&
+    typeof window.screen?.orientation?.angle === "number"
+      ? window.screen.orientation.angle
+      : 0;
+  heading = (heading + screenAngle + 360) % 360;
+  return heading;
+}
+
+/**
+ * Generates a closed GeoJSON Polygon ring ([lng, lat][]) representing a circle in meters.
+ * Used to visualize real-time GPS accuracy radius on MapLibre 3D.
+ */
+export function createGeoJsonCircle(
+  centerLat: number,
+  centerLng: number,
+  radiusMeters: number,
+  steps = 36
+): number[][] {
+  const cosLat = Math.cos((centerLat * Math.PI) / 180);
+  const mPerDegLat = 111320;
+  const mPerDegLng = 111320 * cosLat;
+  const ring: number[][] = [];
+  for (let i = 0; i <= steps; i++) {
+    const theta = (i / steps) * Math.PI * 2;
+    const dx = Math.cos(theta) * radiusMeters;
+    const dy = Math.sin(theta) * radiusMeters;
+    ring.push([
+      Number((centerLng + dx / mPerDegLng).toFixed(6)),
+      Number((centerLat + dy / mPerDegLat).toFixed(6)),
+    ]);
+  }
+  return ring;
+}
+
+/**
  * Builds crisp HTML/SVG for a directional user location triangle with a soft forward vision cone.
  * - For Leaflet 2D: pass `rotateInHtml = true` so CSS rotates the marker by `headingDeg`.
  * - For MapLibre 3D: pass `rotateInHtml = false` and use MapLibre Marker's native `setRotation(headingDeg)`
